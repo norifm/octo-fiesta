@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Caching.Memory;
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
@@ -14,7 +15,7 @@ namespace octo_fiesta.Services.GDStudio;
 /// lists tracks of matching albums), so albums/artists are derived from track results and
 /// identified by name, and found songs are remembered to serve GetSongAsync.
 /// </summary>
-public class GDStudioMetadataService : IMusicMetadataService
+public class GDStudioMetadataService : IMusicMetadataService, IDisposable
 {
     public const string ProviderName = "gdstudio";
 
@@ -22,19 +23,20 @@ public class GDStudioMetadataService : IMusicMetadataService
     private readonly ILogger<GDStudioMetadataService> _logger;
     private readonly GDStudioSettings _s;
 
-    // ponytail: unbounded in-memory map, add eviction if search volume ever makes it matter
-    private readonly ConcurrentDictionary<string, Song> _songs = new();
-    private readonly ConcurrentDictionary<string, string> _pics = new();
-    // Tracks seen per album (in any search), so opening an album still works when a re-query misses it.
-    private readonly ConcurrentDictionary<string, List<GDStudioTrack>> _albumTracks = new();
-
-    // Albums whose track list came from an album or artist listing (as opposed to one song seen in a search):
-    // opening these needs no API call at all.
-    private readonly ConcurrentDictionary<string, byte> _albumListed = new();
+    private readonly MemoryCache _cache = new(new MemoryCacheOptions { SizeLimit = 2048 });
+    private readonly object _cacheLock = new();
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(1);
 
     private void RememberAlbum(string key, IEnumerable<GDStudioTrack> tracks)
-        => _albumTracks.AddOrUpdate(key, _ => tracks.ToList(),
-            (_, old) => old.Concat(tracks).DistinctBy(t => t.Id).ToList());
+    {
+        lock (_cacheLock)
+        {
+            _cache.TryGetValue<List<GDStudioTrack>>("album:" + key, out var old);
+            var merged = (old ?? []).Concat(tracks).DistinctBy(t => t.Id).Take(1000).ToList();
+            _cache.Set("album:" + key, merged, new MemoryCacheEntryOptions()
+                .SetSize(Math.Max(1, merged.Count)).SetAbsoluteExpiration(CacheTtl));
+        }
+    }
 
     public GDStudioMetadataService(
         IHttpClientFactory httpClientFactory,
@@ -68,24 +70,19 @@ public class GDStudioMetadataService : IMusicMetadataService
     // artist page asks for every album at once. So: identical queries are shared and remembered for an
     // hour (in flight or done, never failures), at most MaxParallel run at a time, and a 503/429
     // is retried once after a short pause.
-    private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(1);
     private const int MaxParallel = 4;
     private readonly SemaphoreSlim _gate = new(MaxParallel);
-    // ponytail: unbounded like the maps above, add eviction if it ever matters
-    private readonly ConcurrentDictionary<string, (DateTime At, Task<List<GDStudioTrack>> Task)> _queryCache = new();
-
     private Task<List<GDStudioTrack>> Fetch(string api, string name, int count, int page, TimeSpan timeout)
     {
-        var key = $"{api}\n{count}\n{page}\n{name}";
-        if (_queryCache.TryGetValue(key, out var hit) && DateTime.UtcNow - hit.At < CacheTtl
-            && !hit.Task.IsFaulted && !hit.Task.IsCanceled)
-            return hit.Task;
-
-        var entry = (At: DateTime.UtcNow, Task: FetchCore(api, name, count, page, timeout));
-        _queryCache[key] = entry;
-        _ = entry.Task.ContinueWith(t => { if (t.IsFaulted || t.IsCanceled) _queryCache.TryRemove(new KeyValuePair<string, (DateTime, Task<List<GDStudioTrack>>)>(key, entry)); },
-            TaskScheduler.Default);
-        return entry.Task;
+        var key = $"query:{api}\n{count}\n{page}\n{name}";
+        lock (_cacheLock)
+        {
+            if (_cache.TryGetValue<Task<List<GDStudioTrack>>>(key, out var hit) && hit is not null
+                && !hit.IsFaulted && !hit.IsCanceled) return hit;
+            var task = FetchCore(api, name, count, page, timeout);
+            _cache.Set(key, task, new MemoryCacheEntryOptions().SetSize(1).SetAbsoluteExpiration(CacheTtl));
+            return task;
+        }
     }
 
     private async Task<List<GDStudioTrack>> FetchCore(string api, string name, int count, int page, TimeSpan timeout)
@@ -154,18 +151,7 @@ public class GDStudioMetadataService : IMusicMetadataService
             _logger.LogInformation("GDStudio {Source} '{Query}' (count={Count}, page={Page}) -> {Results} results in {Ms} ms",
                 api, name, asked, page, results.Count, watch.ElapsedMilliseconds);
             return (results.Where(t => !string.IsNullOrEmpty(t.Id))
-                .Select(t =>
-                {
-                    var id = _s.TrackId(source, t.Id);
-                    var artists = t.Artist;
-                    if (source.Equals("apple", StringComparison.OrdinalIgnoreCase) &&
-                        !string.IsNullOrWhiteSpace(name) &&
-                        !artists.Any(a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        artists = [..artists, name];
-                    }
-                    return t with { Id = id, Artist = artists };
-                }).ToList(), true, asked);
+                .Select(t => t with { Id = _s.TrackId(source, t.Id) }).ToList(), true, asked);
         }
         catch (OperationCanceledException)
         {
@@ -182,50 +168,35 @@ public class GDStudioMetadataService : IMusicMetadataService
     // interleaving the results so each source is represented.
     private async Task<List<GDStudioTrack>> QueryAsync(string name, int count, string suffix = "")
     {
+        if (count <= 0) return [];
         count = Math.Min(count, MaxCount);
         var lists = await Task.WhenAll(_s.Sources.Select(async source => (await QuerySourceAsync(source, suffix, name, count, 1)).Tracks));
         return lists.SelectMany(l => l.Select((t, i) => (t, i))).OrderBy(x => x.i).Select(x => x.t).ToList();
     }
 
-    // Songs of one artist: their name as the keyword, a few pages per source (sources in parallel), narrowed to tracks that credit exactly that artist name. The API has no artist ids to match on.
-    // If a page still fails after its retry, what was collected so far is returned, and the rest is fetched again
-    // in the background (successful pages are cached), so the next request finds it complete.
-    private const int ArtistPages = 3;
-    private static readonly TimeSpan[] RetryDelays = [TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60)];
-    private readonly ConcurrentDictionary<string, byte> _retrying = new();
-
-    private async Task<List<GDStudioTrack>> ArtistTracksAsync(string name, int attempt = 0)
+    // Search listings are partial catalogue views. Fetch album pages explicitly when opening an
+    // album, rather than treating tracks seen in an artist/search result as its complete contents.
+    private async Task<List<GDStudioTrack>> QueryPagesAsync(string name, string suffix, int maxPages)
     {
-        var complete = true;
         async Task<List<GDStudioTrack>> Source(string source)
         {
-            // Page 1 tells whether there is more; the remaining pages then go out together (the gate still caps the rate)
-            var (first, ok, asked) = await QuerySourceAsync(source, "", name, MaxCount, 1);
-            if (!ok) { complete = false; return first; }
-            if (first.Count < asked) return first; // short page: that was the last one
-
-            var rest = await Task.WhenAll(Enumerable.Range(2, ArtistPages - 1).Select(page => QuerySourceAsync(source, "", name, asked, page)));
-            if (rest.Any(r => !r.Ok)) complete = false;
-            return first.Concat(rest.SelectMany(r => r.Tracks)).ToList();
-        }
-
-        var lists = await Task.WhenAll(_s.Sources.Select(Source));
-        if (!complete && attempt < RetryDelays.Length && _retrying.TryAdd(name, 0))
-        {
-            _logger.LogWarning("GDStudio artist '{Artist}' is incomplete, returning what arrived and retrying in {Seconds}s", name, RetryDelays[attempt].TotalSeconds);
-            _ = Task.Run(async () =>
+            var collected = new List<GDStudioTrack>();
+            for (var page = 1; page <= maxPages; page++)
             {
-                try { await Task.Delay(RetryDelays[attempt]); _retrying.TryRemove(name, out _); await GetArtistAlbumsAsync(ProviderName, Enc(name), attempt + 1); }
-                finally { _retrying.TryRemove(name, out _); }
-            });
+                var (tracks, ok, asked) = await QuerySourceAsync(source, suffix, name, MaxCount, page);
+                if (!ok) break; // Failed pages are not cached; the next request retries them.
+                var before = collected.Count;
+                collected.AddRange(tracks.Where(t => collected.All(old => old.Id != t.Id)));
+                if (tracks.Count < asked || collected.Count == before) break;
+            }
+            return collected;
         }
-        return lists.SelectMany(l => l.Select((t, i) => (t, i))).OrderBy(x => x.i).Select(x => x.t)
-            .Where(t => t.Artist.Any(a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase)))
-            .ToList();
+        var lists = await Task.WhenAll(_s.Sources.Select(Source));
+        return lists.SelectMany(l => l.Select((t, i) => (t, i))).OrderBy(x => x.i).Select(x => x.t).ToList();
     }
 
     public async Task<List<Song>> SearchSongsAsync(string query, int limit = 20)
-        => (await QueryAsync(query, limit)).Select(ToSong).ToList();
+        => (await QueryAsync(query, limit)).Take(Math.Max(0, limit)).Select(ToSong).ToList();
 
     // An album is identified by its name plus its first artist, so different releases that share a name
     // (every artist has a "素颜") stay apart. Ids without an artist part are still understood.
@@ -238,14 +209,12 @@ public class GDStudioMetadataService : IMusicMetadataService
         return i < 0 ? (text, null) : (text[..i], text[(i + 1)..]);
     }
 
-    // Groups tracks into albums (name + first artist). `listed` marks the albums as fully listed, so opening
-    // one is served from memory.
-    private List<Album> AlbumsFrom(IEnumerable<GDStudioTrack> tracks, bool listed)
+    // Group search results for browsing; these do not establish a complete track list.
+    private List<Album> AlbumsFrom(IEnumerable<GDStudioTrack> tracks)
         => tracks.GroupBy(t => (t.Album, Artist: t.Artist.FirstOrDefault())).Where(g => g.Key.Album != "").Select(g =>
         {
             var key = AlbumKey(g.Key.Album, g.Key.Artist);
             RememberAlbum(key, g);
-            if (listed) _albumListed[key] = 0;
             return new Album
             {
                 Id = AlbumPrefix + key,
@@ -259,24 +228,25 @@ public class GDStudioMetadataService : IMusicMetadataService
         }).ToList();
 
     public async Task<List<Album>> SearchAlbumsAsync(string query, int limit = 20)
-        => AlbumsFrom(await QueryAsync(query, 50, "_album"), listed: true).Take(limit).ToList();
+        => AlbumsFrom(await QueryAsync(query, 50, "_album")).Take(limit).ToList();
 
     public async Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
     {
         if (externalProvider != ProviderName) return null;
         var (name, artist) = SplitAlbumKey(externalId);
-        var cached = _albumTracks.TryGetValue(externalId, out var seen) ? seen : [];
+        _cache.TryGetValue<List<GDStudioTrack>>("album:" + externalId, out var cached);
         bool IsThisAlbum(GDStudioTrack t) => t.Album == name && (artist is null || t.Artist.FirstOrDefault() == artist);
-        // One album search per source (results are shared and remembered, see Fetch), plus what earlier searches
-        // already showed for this album...
-        // ...unless an artist or album listing already gave us the tracks: then there is no request at all.
-        var tracks = _albumListed.ContainsKey(externalId)
-            ? cached.Where(IsThisAlbum).ToList()
-            : (await QueryAsync(name, MaxCount, "_album")).Concat(cached).DistinctBy(t => t.Id).Where(IsThisAlbum).ToList();
-        // ...and only when that finds nothing (the album search returns just the best few matches) a track
-        // search for "<artist> <album>", to keep the request count down.
+        var tracks = (await QueryPagesAsync(name, "_album", 10)).Concat(cached ?? [])
+            .DistinctBy(t => t.Id).Where(IsThisAlbum).ToList();
         if (tracks.Count == 0)
             tracks = (await QueryAsync(artist is null ? name : $"{artist} {name}", MaxCount)).Where(IsThisAlbum).ToList();
+        // Different sources carry alternative copies. Use the first configured source with matches
+        // for an album, so every song is not downloaded once per upstream source.
+        if (tracks.Count > 0)
+        {
+            var source = _s.SplitTrackId(tracks[0].Id).Source;
+            tracks = tracks.Where(t => _s.SplitTrackId(t.Id).Source == source).ToList();
+        }
         if (tracks.Count == 0) return null;
         var songs = tracks.Select(ToSong).ToList();
         for (var i = 0; i < songs.Count; i++) { songs[i].Track = i + 1; songs[i].TotalTracks = songs.Count; }
@@ -299,13 +269,21 @@ public class GDStudioMetadataService : IMusicMetadataService
     public Task<Artist?> GetArtistAsync(string externalProvider, string externalId)
         => Task.FromResult(externalProvider == ProviderName ? ToArtist(Dec(externalId)) : null);
 
-    public Task<List<Album>> GetArtistAlbumsAsync(string externalProvider, string externalId)
-        => GetArtistAlbumsAsync(externalProvider, externalId, 0);
-
-    private async Task<List<Album>> GetArtistAlbumsAsync(string externalProvider, string externalId, int attempt)
+    public async Task<List<Album>> GetArtistAlbumsAsync(string externalProvider, string externalId)
     {
         if (externalProvider != ProviderName) return [];
-        return AlbumsFrom(await ArtistTracksAsync(Dec(externalId), attempt), listed: true);
+        var name = Dec(externalId);
+        var aliases = _s.ArtistAliases.TryGetValue(name, out var names) ? names : [];
+        bool Matches(string artist) => artist.Equals(name, StringComparison.OrdinalIgnoreCase)
+            || aliases.Any(alias => artist.Equals(alias, StringComparison.OrdinalIgnoreCase));
+        return AlbumsFrom((await QueryPagesAsync(name, "", 3)).Where(t => t.Artist.Any(Matches)));
+    }
+
+    public async Task<string?> GetAlbumCoverUrlAsync(string externalProvider, string externalId)
+    {
+        var album = await GetAlbumAsync(externalProvider, externalId);
+        var first = album?.Songs.FirstOrDefault();
+        return first?.ExternalId is { } id ? (await GetSongAsync(externalProvider, id))?.CoverArtUrl : null;
     }
 
     public async Task<SearchResult> SearchAllAsync(string query, int songLimit = 20, int albumLimit = 20, int artistLimit = 20)
@@ -320,15 +298,13 @@ public class GDStudioMetadataService : IMusicMetadataService
     }
 
     // No get-by-id upstream ("url" only returns the file link), so serve what we've seen in
-    // searches/albums. After a restart an unseen id falls back to a bare song (title = id).
+    // searches/albums. Unknown ids require a fresh search before downloading.
     public async Task<Song?> GetSongAsync(string externalProvider, string externalId)
     {
         if (externalProvider != ProviderName) return null;
-        var song = _songs.GetOrAdd(externalId, id => new Song
-        {
-            Title = id, ExternalProvider = ProviderName, ExternalId = id
-        });
-        if (song.CoverArtUrlLarge is null && _pics.TryGetValue(externalId, out var pic))
+        if (!_cache.TryGetValue<Song>("song:" + externalId, out var song) || song is null)
+            return null; // An unknown id must not create an incorrectly tagged download.
+        if (song.CoverArtUrlLarge is null && _cache.TryGetValue<string>("pic:" + externalId, out var pic) && pic is not null)
         {
             song.CoverArtUrlLarge = song.CoverArtUrl = await ResolvePicAsync(externalId, pic);
         }
@@ -386,10 +362,16 @@ public class GDStudioMetadataService : IMusicMetadataService
             ExternalProvider = ProviderName,
             ExternalId = t.Id
         };
-        _songs[t.Id] = song;
+        _cache.Set("song:" + t.Id, song, new MemoryCacheEntryOptions().SetSize(1).SetAbsoluteExpiration(CacheTtl));
         if (t.Album != "") RememberAlbum(AlbumKey(t.Album, t.Artist.FirstOrDefault()), [t]);
-        if (!string.IsNullOrEmpty(t.PicId)) _pics[t.Id] = t.PicId;
+        if (!string.IsNullOrEmpty(t.PicId)) _cache.Set("pic:" + t.Id, t.PicId, new MemoryCacheEntryOptions().SetSize(1).SetAbsoluteExpiration(CacheTtl));
         return song;
+    }
+
+    public void Dispose()
+    {
+        _cache.Dispose();
+        _gate.Dispose();
     }
 
     private record GDStudioTrack(

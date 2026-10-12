@@ -64,14 +64,13 @@ public class GDStudioDownloadService : BaseDownloadService
                 cancellationToken);
             if (string.IsNullOrEmpty(info?.Url)) continue;
 
-            var downloadUrl = info.Url;
-            if (!Uri.TryCreate(downloadUrl, UriKind.Absolute, out _))
-            {
-                var baseUri = new Uri(_settings.Api);
-                var siteHost = baseUri.Host.Replace("music-api.", "music.");
-                var origin = $"{baseUri.Scheme}://{siteHost}";
-                downloadUrl = $"{origin.TrimEnd('/')}/{downloadUrl.TrimStart('/')}";
-            }
+            var apiOrigin = new UriBuilder(_settings.Api);
+            apiOrigin.Host = apiOrigin.Host.Replace("music-api.", "music.", StringComparison.OrdinalIgnoreCase);
+            apiOrigin.Path = "/"; apiOrigin.Query = "";
+            var mediaUri = new Uri(apiOrigin.Uri, info.Url);
+            if (mediaUri.Scheme is not ("http" or "https"))
+                throw new InvalidOperationException("GDStudio returned a non-HTTP audio URL");
+            var downloadUrl = mediaUri.AbsoluteUri;
 
             var response = await _http.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode)
@@ -82,7 +81,9 @@ public class GDStudioDownloadService : BaseDownloadService
 
             var ext = Path.GetExtension(new Uri(downloadUrl).AbsolutePath).ToLowerInvariant();
             if (ext is not (".flac" or ".mp3" or ".m4a" or ".aac" or ".ogg")) ext = info.Br >= 740 ? ".flac" : ".mp3";
-            var quality = ext == ".flac" ? "FLAC" : info.Br >= 320 ? "MP3_320" : info.Br >= 192 ? "MP3_192" : "MP3_128";
+            var quality = info.Br <= 0 ? null : info.Br >= 740
+                ? (info.Br >= 999 ? "FLAC_24" : "FLAC_16")
+                : $"{(ext is ".m4a" or ".aac" ? "AAC" : "MP3")}_{info.Br}";
 
             var stream = await HttpResponseStream.CreateAsync(response, cancellationToken);
             return new DownloadResult(stream, ext, quality);

@@ -102,6 +102,17 @@ public class BaseDownloadServiceProviderPathOverrideTests : IDisposable
         Assert.Equal(_sharedPath, service.EffectiveDownloadPath);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void EmptyProviderOverride_UsesSharedPath(string path)
+    {
+        var service = BuildService(
+            (h, c, l, m, s, sp, lg) => new AppleMusicLikeDownloadService(h, c, l, m, s, sp, lg),
+            new Dictionary<string, string?> { ["Library:DownloadPath"] = _sharedPath, ["AppleMusic:DownloadPath"] = path });
+        Assert.Equal(_sharedPath, service.EffectiveDownloadPath);
+    }
+
     private abstract class FakeDownloadServiceBase : BaseDownloadService
     {
         public string EffectiveDownloadPath => DownloadPath;

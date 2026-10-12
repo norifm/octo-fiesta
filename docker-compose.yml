@@ -37,8 +37,6 @@ services:
       - Subsonic__DownloadMode=${DOWNLOAD_MODE:-Track}
       # Auto upgrade quality: re-download tracks when higher quality is available (default: false)
       - Subsonic__AutoUpgradeQuality=${AUTO_UPGRADE_QUALITY:-false}
-      # On a file name collision: false = skip download, true = replace only if the new bitrate is higher (default: false)
-      - Subsonic__AllowBitrateUpgrade=${ALLOW_BITRATE_UPGRADE:-false}
       # Disable triggering a library scan after a download completes (default: false)
       # Useful if your Subsonic server or an external automation already picks up new files
       - Subsonic__DisableLibraryScan=${DISABLE_LIBRARY_SCAN:-false}
@@ -135,18 +133,22 @@ services:
       # Available: true, false
       - Yandex__IncludeUnavailable=${YANDEX_INCLUDE_UNAVAILABLE_TRACKS:-false}
 
-      # ===== GDSTUDIO SETTINGS (MUSIC_SERVICE=GDStudio) =====
-      # Upstream source, one of the "stable" sources (netease, joox, bilibili). Default: netease
+      # ===== OPTIONAL FORK PROVIDER FEATURES (docs/fork-providers.md) =====
+      - Subsonic__AllowBitrateUpgrade=${ALLOW_BITRATE_UPGRADE:-false}
+      - Subsonic__ShowExternalProviderInSuffix=${SHOW_EXTERNAL_PROVIDER_IN_SUFFIX:-false}
       - GDStudio__Source=${GDSTUDIO_SOURCE:-netease}
-      # Per-source timeout in seconds for search/metadata calls (3x for the first call to each source); a slow source is logged and skipped. Default: 8
       - GDStudio__TimeoutSeconds=${GDSTUDIO_TIMEOUT_SECONDS:-8}
-      # Audio quality (br): 128, 192, 320, 740 (16-bit lossless), 999 (24-bit lossless). Default: 999
-      # If unsupported or empty, the next lower option is tried once.
       - GDStudio__Br=${GDSTUDIO_BR:-999}
-      # API endpoint. Default: https://music-api.gdstudio.xyz/api.php
       - GDStudio__Api=${GDSTUDIO_API:-https://music-api.gdstudio.xyz/api.php}
-      # Proxy for all calls, e.g. http://host:port, https://host:port or socks5://host:port
       - GDStudio__Proxy=${GDSTUDIO_PROXY:-}
+      # Empty values retain Library__DownloadPath. Mount nonempty paths separately.
+      - Deezer__DownloadPath=${DEEZER_DOWNLOAD_PATH:-}
+      - Qobuz__DownloadPath=${QOBUZ_DOWNLOAD_PATH:-}
+      - Tidal__DownloadPath=${TIDAL_DOWNLOAD_PATH:-}
+      - Yandex__DownloadPath=${YANDEX_DOWNLOAD_PATH:-}
+      - SquidWTF__DownloadPath=${SQUIDWTF_DOWNLOAD_PATH:-}
+      - AppleMusic__DownloadPath=${APPLE_MUSIC_DOWNLOAD_PATH:-}
+      - GDStudio__DownloadPath=${GDSTUDIO_DOWNLOAD_PATH:-}
     volumes:
       - ${DOWNLOAD_PATH:-./downloads}:/app/downloads
       # Holds the Tidal token store, only needed when MUSIC_SERVICE=Tidal

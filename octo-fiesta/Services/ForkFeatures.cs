@@ -11,6 +11,8 @@ public static class ForkFeatures
         this IServiceCollection services,
         IConfiguration configuration)
     {
+        Composite.ProviderFeature.Configure(services, configuration);
+
         services.AddMemoryCache(options => options.SizeLimit = 512);
 
         services.AddHttpClient(ExternalCoverArtService.HttpClientName, client =>

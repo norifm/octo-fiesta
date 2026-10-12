@@ -29,7 +29,7 @@ public class GDStudioAppleSourceTests
     private static string Id(string s) => Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(s)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     [Fact]
-    public async Task AppleSource_WhenQueriedInChinese_PreservesArtistAndReturnsAlbums()
+    public async Task AppleSource_WhenQueriedInChinese_UsesExplicitAliasAndPreservesArtist()
     {
         // Upstream Apple Music returns Romanized artist (Jay Chou) when queried with Chinese name (周杰伦)
         var appleResponse = """
@@ -52,7 +52,7 @@ public class GDStudioAppleSourceTests
         factory.Setup(f => f.CreateClient(GDStudioHttpClientConfiguration.ClientName)).Returns(new HttpClient(handler));
 
         var service = new GDStudioMetadataService(factory.Object,
-            Options.Create(new GDStudioSettings { Source = "apple", TimeoutSeconds = 5 }),
+            Options.Create(new GDStudioSettings { Source = "apple", TimeoutSeconds = 5, ArtistAliases = new() { ["周杰伦"] = ["Jay Chou"] } }),
             NullLogger<GDStudioMetadataService>.Instance);
 
         // 1. GetArtistAlbumsAsync for Chinese artist name
@@ -63,10 +63,10 @@ public class GDStudioAppleSourceTests
         Assert.Contains(albums, a => a.Title == "Common Jasmine Orange");
         Assert.Contains(albums, a => a.Title == "Yeh, Hwei-Mei");
 
-        // 2. SearchSongsAsync attaches queried artist name
+        // 2. A normal query never changes the upstream artist tags.
         var songs = await service.SearchSongsAsync("周杰伦");
         Assert.Equal(2, songs.Count);
-        Assert.Contains("周杰伦", songs[0].Artist);
+        Assert.DoesNotContain("周杰伦", songs[0].Artist);
         Assert.Contains("Jay Chou", songs[0].Artist);
     }
 

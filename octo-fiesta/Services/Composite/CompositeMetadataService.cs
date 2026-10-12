@@ -29,7 +29,7 @@ public class CompositeMetadataService : IMusicMetadataService
     }
 
     // Runs one provider call; on an exception or timeout logs it and returns the fallback.
-    // ponytail: a timed-out call is abandoned, not cancelled (the interface takes no token)
+    // Timed-out work cannot be cancelled until provider interfaces accept cancellation tokens.
     private async Task<T> Guard<T>(string provider, Func<Task<T>> call, T fallback)
     {
         try { return await call().WaitAsync(ProviderTimeout); }
@@ -95,6 +95,9 @@ public class CompositeMetadataService : IMusicMetadataService
 
     public Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
         => Route(externalProvider, s => s.GetAlbumAsync(externalProvider, externalId), (Album?)null);
+
+    public Task<string?> GetAlbumCoverUrlAsync(string externalProvider, string externalId)
+        => Route(externalProvider, s => s.GetAlbumCoverUrlAsync(externalProvider, externalId), (string?)null);
 
     public Task<Artist?> GetArtistAsync(string externalProvider, string externalId)
         => Route(externalProvider, s => s.GetArtistAsync(externalProvider, externalId), (Artist?)null);

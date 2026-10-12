@@ -116,7 +116,8 @@ public abstract class BaseDownloadService : IDownloadService
         // case-insensitive, so ProviderName's lowercase form ("applemusic") matches the
         // PascalCase env var section ("AppleMusic") without any extra mapping.
         var providerDownloadPath = configuration[$"{ProviderName}:DownloadPath"];
-        DownloadPath = providerDownloadPath ?? configuration["Library:DownloadPath"] ?? "./downloads";
+        DownloadPath = !string.IsNullOrWhiteSpace(providerDownloadPath)
+            ? providerDownloadPath : configuration["Library:DownloadPath"] ?? "./downloads";
         CachePath = PathHelper.GetCachePath();
 
         if (!Directory.Exists(DownloadPath))
@@ -468,7 +469,10 @@ public abstract class BaseDownloadService : IDownloadService
     /// </summary>
     /// <param name="LibraryPath">Set when the provider already placed the file in the library
     /// itself (e.g. alacarte); the stream is then ignored and the file is used where it is.</param>
-    public record DownloadResult(Stream DownloadStream, string Extension, string? DownloadedQuality, double? Mp4DurationSeconds = null, string? LibraryPath = null);
+    public record DownloadResult(Stream DownloadStream, string Extension, string? DownloadedQuality, double? Mp4DurationSeconds = null, string? LibraryPath = null)
+    {
+        public string? StoredQuality { get; set; } = DownloadedQuality;
+    }
 
     /// <summary>
     /// Downloads a track and saves it to disk.
@@ -536,6 +540,7 @@ public abstract class BaseDownloadService : IDownloadService
             StartedAt = DateTime.UtcNow
         };
         
+        string? bitrateCandidate = null;
         try
         {
             // Check if already downloaded (skip for cache mode as we want to check cache folder)
@@ -569,7 +574,11 @@ public abstract class BaseDownloadService : IDownloadService
                             }
                         }
                     }
-                    if (existingPath != null)
+                    if (existingPath != null && SubsonicSettings.AllowBitrateUpgrade)
+                    {
+                        bitrateCandidate = existingPath;
+                    }
+                    else if (existingPath != null)
                     {
                         Logger.LogInformation("Found existing local file without mapping, registering: {Path}", existingPath);
                         await LocalLibraryService.RegisterDownloadedSongAsync(probeSong, existingPath, downloadedQuality: null, localSubsonicId: existingSubsonicId);
@@ -584,9 +593,10 @@ public abstract class BaseDownloadService : IDownloadService
                     // Check if we should upgrade quality
                     var targetQuality = GetTargetQuality();
                     bool shouldUpgrade = IsQualityUpgradeAvailable(existingMapping.DownloadedQuality);
+                    if (SubsonicSettings.AllowBitrateUpgrade) bitrateCandidate = existingMapping.LocalPath;
 
                     // No upgrade needed – return already downloaded path
-                    if (!shouldUpgrade)
+                    if (!shouldUpgrade && !SubsonicSettings.AllowBitrateUpgrade)
                     {
                         Logger.LogInformation("Song already downloaded: {Path}", existingMapping.LocalPath);
                         ourDownloadInfo.Status = DownloadStatus.Completed;
@@ -595,25 +605,28 @@ public abstract class BaseDownloadService : IDownloadService
                         return existingMapping.LocalPath;
                     }
 
-                    // Back up existing track for quality upgrade
-                    Logger.LogInformation("Upgrading quality from {OldQuality} to {NewQuality} for: {Path}",
-                        existingMapping.DownloadedQuality ?? "unknown", targetQuality, existingMapping.LocalPath);
-                    var backupPath = existingMapping.LocalPath + ".backup";
-                    try
+                    if (!SubsonicSettings.AllowBitrateUpgrade)
                     {
-                        IOFile.Move(existingMapping.LocalPath, backupPath);
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogWarning(ex, "Failed to create backup for quality upgrade, skipping upgrade");
-                        ourDownloadInfo.Status = DownloadStatus.Completed;
-                        ourDownloadInfo.CompletedAt = DateTime.UtcNow;
-                        ourDownloadInfo.LocalPath = existingMapping.LocalPath;
-                        return existingMapping.LocalPath;
-                    }
+                        // Back up existing track for quality upgrade
+                        Logger.LogInformation("Upgrading quality from {OldQuality} to {NewQuality} for: {Path}",
+                            existingMapping.DownloadedQuality ?? "unknown", targetQuality, existingMapping.LocalPath);
+                        var backupPath = existingMapping.LocalPath + ".backup";
+                        try
+                        {
+                            IOFile.Move(existingMapping.LocalPath, backupPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogWarning(ex, "Failed to create backup for quality upgrade, skipping upgrade");
+                            ourDownloadInfo.Status = DownloadStatus.Completed;
+                            ourDownloadInfo.CompletedAt = DateTime.UtcNow;
+                            ourDownloadInfo.LocalPath = existingMapping.LocalPath;
+                            return existingMapping.LocalPath;
+                        }
 
-                    // Store backup path to restore on failure
-                    ourDownloadInfo.BackupPath = backupPath;
+                        // Store backup path to restore on failure
+                        ourDownloadInfo.BackupPath = backupPath;
+                    }
                 }
             }
             else
@@ -639,7 +652,11 @@ public abstract class BaseDownloadService : IDownloadService
             if (!isCache && ourDownloadInfo.BackupPath == null)
             {
                 var ownedPath = await LocalLibraryService.GetOwnedLibraryPathAsync(externalProvider, externalId);
-                if (!string.IsNullOrEmpty(ownedPath) && IOFile.Exists(ownedPath))
+                if (SubsonicSettings.AllowBitrateUpgrade && !string.IsNullOrEmpty(ownedPath) && IOFile.Exists(ownedPath))
+                {
+                    bitrateCandidate ??= ownedPath;
+                }
+                else if (!string.IsNullOrEmpty(ownedPath) && IOFile.Exists(ownedPath))
                 {
                     Logger.LogInformation("Song already in local library, skipping download: {Path}", ownedPath);
                     ourDownloadInfo.Status = DownloadStatus.Completed;
@@ -660,6 +677,7 @@ public abstract class BaseDownloadService : IDownloadService
             var useUploadApi = downloadResult.LibraryPath == null
                 && !isCache
                 && string.IsNullOrEmpty(ourDownloadInfo.BackupPath)
+                && bitrateCandidate == null
                 && uploadService != null
                 && uploadService.IsConfigured;
 
@@ -688,7 +706,7 @@ public abstract class BaseDownloadService : IDownloadService
             {
                 await using (downloadResult.DownloadStream)
                 {
-                    localPath = await SaveDownloadStreamToFileAsync(downloadResult, song, isCache, cancellationToken);
+                    localPath = await SaveDownloadStreamToFileAsync(downloadResult, song, isCache, cancellationToken, bitrateCandidate);
                 }
             }
 
@@ -724,7 +742,7 @@ public abstract class BaseDownloadService : IDownloadService
             if (!isCache)
             {
                 await LocalLibraryService.RegisterDownloadedSongAsync(
-                    song, localPath, downloadResult.DownloadedQuality, navidromeUploadId);
+                    song, localPath, downloadResult.StoredQuality, navidromeUploadId);
 
                 // The upload API ingests the track immediately, so no scan is needed in that path.
                 if (navidromeUploadId == null)
@@ -870,90 +888,44 @@ public abstract class BaseDownloadService : IDownloadService
     /// <param name="result">DownloadResult containing download Stream and quality string.</param>
     /// <param name="song">Song metadata to interpolate into storage template.</param>
     /// <returns></returns>
-    protected async Task<string> SaveDownloadStreamToFileAsync(DownloadResult result, Song song, bool toCache, CancellationToken cancellationToken)
+    protected async Task<string> SaveDownloadStreamToFileAsync(DownloadResult result, Song song, bool toCache,
+        CancellationToken cancellationToken, string? bitrateCandidate = null)
     {
         var basePath = toCache ? CachePath : DownloadPath;
         var outputPath = PathHelper.BuildTrackPath(basePath, song, result.Extension, SubsonicSettings.FolderTemplate, result.DownloadedQuality);
-
-        // Create directories
-        var albumFolder = Path.GetDirectoryName(outputPath)!;
-        EnsureDirectoryExists(albumFolder);
-
-        // Same file name already on disk: keep it unless bitrate upgrades are allowed and the
-        // incoming track is better (decided before reading the stream); a better one is written
-        // beside the old file and swapped in on completion.
-        var collided = IOFile.Exists(outputPath);
-        if (collided && !(SubsonicSettings.AllowBitrateUpgrade && IsBitrateUpgrade(outputPath, result.DownloadedQuality)))
-        {
-            Logger.LogInformation("File already exists, skipping download: {Path}", outputPath);
-            await result.DownloadStream.DisposeAsync();
-            return outputPath;
-        }
-        var writePath = collided
-            ? Path.Combine(albumFolder, Path.GetFileNameWithoutExtension(outputPath) + ".new" + Path.GetExtension(outputPath))
-            : outputPath;
-
-        try
-        {
-            // Download the file with progress logging and stall detection
-            await using var outputFile = IOFile.Create(writePath);
-            await CopyWithProgressAsync(result.DownloadStream, outputFile, song.Title, cancellationToken);
-            await outputFile.DisposeAsync();
-
-            // Detect actual audio format from magic bytes and rename if the extension is wrong.
-            // This catches cases where the stream is raw FLAC but we assumed MP4 container.
-            writePath = CorrectExtensionIfNeeded(writePath);
-            outputPath = writePath;
-
-            if (collided)
+        EnsureDirectoryExists(Path.GetDirectoryName(outputPath)!);
+        var existingPath = bitrateCandidate ?? ProbeForExistingFile(outputPath);
+        var saved = await DownloadFileStore.SaveAsync(outputPath, existingPath,
+            SubsonicSettings.AllowBitrateUpgrade, result.DownloadedQuality, async stage =>
             {
-                outputPath = Path.Combine(albumFolder,
-                    Path.GetFileNameWithoutExtension(writePath)[..^".new".Length] + Path.GetExtension(writePath));
-                Logger.LogInformation("Replacing {Path} with higher bitrate download", outputPath);
-                IOFile.Move(writePath, outputPath, overwrite: true);
-            }
-
-            Logger.LogInformation("Downloaded file to: {Path}", outputPath);
-
-            // Write metadata
-            await WriteMetadataAsync(outputPath, song, cancellationToken);
-
-            // Fragmented MP4 (Tidal HI_RES FLAC-in-MP4) carries no top-level duration; patch it
-            // so tag scanners don't report 0:00. Done last so it survives the metadata write.
-            PatchMp4DurationIfNeeded(outputPath, result);
-
-            // For permanent files, drop a .lrc sidecar so the backing server serves synced
-            // lyrics on later listens and to other clients. Fire-and-forget: never delay or
-            // fail the download (the audio is already on disk).
-            if (!toCache && LyricsService is { Enabled: true })
-            {
-                var sidecarService = LyricsService;
-                var sidecarPath = outputPath;
-                var sidecarSong = song;
-                _ = Task.Run(() => sidecarService.TryWriteSidecarAsync(sidecarPath, sidecarSong, CancellationToken.None));
-            }
-
-            return outputPath;
-        }
-        catch
+                var written = stage;
+                try
+                {
+                    await using (var outputFile = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                        await CopyWithProgressAsync(result.DownloadStream, outputFile, song.Title, cancellationToken);
+                    written = CorrectExtensionIfNeeded(stage);
+                    await WriteMetadataAsync(written, song, cancellationToken);
+                    PatchMp4DurationIfNeeded(written, result);
+                    return written;
+                }
+                catch
+                {
+                    TryDeleteIncompleteFile(written);
+                    throw;
+                }
+            }, cancellationToken, SubsonicSettings.AutoUpgradeQuality);
+        if (saved.ReusedExistingFile)
         {
-            TryDeleteIncompleteFile(writePath);
-            throw;
+            result.StoredQuality = DownloadFileStore.ReadQuality(saved.Path);
+            Logger.LogInformation("Keeping existing file: {Path}", saved.Path);
         }
-    }
-
-    // ponytail: any existing .flac counts as top quality (16 vs 24-bit not compared)
-    private static bool IsBitrateUpgrade(string existingPath, string? newQuality)
-    {
-        if (string.IsNullOrEmpty(newQuality) || existingPath.EndsWith(".flac", StringComparison.OrdinalIgnoreCase))
-            return false;
-        if (newQuality.StartsWith("FLAC", StringComparison.OrdinalIgnoreCase))
-            return true;
-        // Lossy quality strings end in the bitrate, e.g. MP3_320
-        if (!int.TryParse(newQuality[(newQuality.LastIndexOf('_') + 1)..], out var newKbps))
-            return false;
-        try { return newKbps > TagLib.File.Create(existingPath).Properties.AudioBitrate; }
-        catch { return false; }
+        else
+        {
+            Logger.LogInformation("Downloaded file to: {Path}", saved.Path);
+            if (!toCache && LyricsService is { Enabled: true } sidecarService)
+                _ = Task.Run(() => sidecarService.TryWriteSidecarAsync(saved.Path, song, CancellationToken.None));
+        }
+        return saved.Path;
     }
 
     // Reads the first bytes of the written file, detects the audio format, and renames

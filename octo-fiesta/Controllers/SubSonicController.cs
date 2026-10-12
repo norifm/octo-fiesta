@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using System.Xml.Linq;
 using System.Text;
 using System.Text.Json;
@@ -479,9 +479,8 @@ public partial class SubsonicController : ControllerBase
         }
 
         var candidates = (await _metadataService.SearchArtistsAsync(artistName, 20))
-            .Where(a => !string.IsNullOrEmpty(a.ExternalId))
-            .OrderByDescending(a => a.Name.Equals(artistName, StringComparison.OrdinalIgnoreCase))
-            .ThenByDescending(a => a.AlbumCount ?? 0)
+            .Where(a => !string.IsNullOrEmpty(a.ExternalId) && a.Name.Equals(artistName, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(a => a.AlbumCount ?? 0)
             .ThenByDescending(a => string.Equals(a.Name, artistName, StringComparison.Ordinal))
             .ToList();
 
@@ -582,50 +581,19 @@ public partial class SubsonicController : ControllerBase
             return true;
         }
 
-        if (ExtendsAtWordBoundary(candidateKey, artistKey))
+        if (!ExtendsAtWordBoundary(candidateKey, artistKey))
         {
-            var suffix = candidateKey[artistKey.Length..].TrimStart();
-            if (suffix.StartsWith('&') || suffix.StartsWith(','))
-            {
-                return true;
-            }
-
-            var firstWord = suffix.Split(' ')[0].Trim('.');
-            if (CollaborationWords.Contains(firstWord))
-            {
-                return true;
-            }
+            return false;
         }
 
-        // Also check if candidateArtist is a multi-artist list (e.g. "Artist1, Artist2" or "Artist1 & Artist2")
-        // and one of the artist tokens matches or collaborates with artistName
-        var tokens = candidateArtist?.Split(new[] { ',', '&', '/', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (tokens != null && tokens.Length > 1)
+        var suffix = candidateKey[artistKey.Length..].TrimStart();
+        if (suffix.StartsWith('&') || suffix.StartsWith(','))
         {
-            foreach (var token in tokens)
-            {
-                var tokenKey = StringNormalizer.CreateComparisonKey(token);
-                if (tokenKey == artistKey)
-                {
-                    return true;
-                }
-                if (ExtendsAtWordBoundary(tokenKey, artistKey))
-                {
-                    var suffix = tokenKey[artistKey.Length..].TrimStart();
-                    if (suffix.StartsWith('&') || suffix.StartsWith(','))
-                    {
-                        return true;
-                    }
-                    var firstWord = suffix.Split(' ')[0].Trim('.');
-                    if (CollaborationWords.Contains(firstWord))
-                    {
-                        return true;
-                    }
-                }
-            }
+            return true;
         }
 
-        return false;
+        var firstWord = suffix.Split(' ')[0].Trim('.');
+        return CollaborationWords.Contains(firstWord);
     }
 
     /// <summary>

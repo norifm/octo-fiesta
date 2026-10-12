@@ -34,7 +34,7 @@ public class StartupValidationOrchestrator : IHostedService
         // Configuration summary section
         WriteSection("Configuration", () =>
         {
-            WriteConfigLine("Music Service", settings.MusicServices);
+            WriteConfigLine("Music Service", settings.MusicService.ToString());
             WriteConfigLine("Storage Mode", settings.StorageMode.ToString());
             WriteConfigLine("Download Mode", settings.DownloadMode.ToString());
             WriteConfigLine("External Playlists", settings.EnableExternalPlaylists ? "Enabled" : "Disabled");

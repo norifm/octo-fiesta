@@ -76,6 +76,33 @@ public class CompositeResilienceTests
     }
 
     [Fact]
+    public async Task AlbumCover_RoutesToTheLightweightLookup()
+    {
+        var provider = new Mock<IMusicMetadataService>();
+        provider.Setup(p => p.GetAlbumCoverUrlAsync("qobuz", "1")).ReturnsAsync("https://example.test/cover");
+        var composite = Composite(TimeSpan.FromSeconds(1), ("qobuz", provider.Object));
+        Assert.Equal("https://example.test/cover", await composite.GetAlbumCoverUrlAsync("qobuz", "1"));
+        provider.Verify(p => p.GetAlbumAsync(It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Searches_InterleaveAndRespectLimit_AndDownloadsRouteByProvider()
+    {
+        var first = new Mock<IMusicMetadataService>();
+        var second = new Mock<IMusicMetadataService>();
+        first.Setup(p => p.SearchSongsAsync("q", 3)).ReturnsAsync([Track("deezer", "1"), Track("deezer", "2")]);
+        second.Setup(p => p.SearchSongsAsync("q", 3)).ReturnsAsync([Track("qobuz", "1"), Track("qobuz", "2")]);
+        var composite = Composite(TimeSpan.FromSeconds(1), ("deezer", first.Object), ("qobuz", second.Object));
+        Assert.Equal(["deezer", "qobuz", "deezer"], (await composite.SearchSongsAsync("q", 3)).Select(s => s.ExternalProvider!).ToArray());
+        var deezer = new Mock<IDownloadService>();
+        var qobuz = new Mock<IDownloadService>();
+        qobuz.Setup(d => d.DownloadSongAsync("qobuz", "1", default)).ReturnsAsync("qobuz-file");
+        var downloads = new CompositeDownloadService([("deezer", deezer.Object), ("qobuz", qobuz.Object)]);
+        Assert.Equal("qobuz-file", await downloads.DownloadSongAsync("qobuz", "1"));
+        deezer.Verify(d => d.DownloadSongAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
     public async Task IsAvailable_WhenTheFirstProviderThrows_StillChecksTheOthers()
     {
         var broken = new Mock<octo_fiesta.Services.IDownloadService>();

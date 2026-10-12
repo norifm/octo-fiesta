@@ -93,9 +93,7 @@ public enum MusicService
     /// </summary>
     AppleMusic,
 
-    /// <summary>
-    /// GD Studio aggregator API (netease, joox, bilibili, ...)
-    /// </summary>
+    /// <summary>GD Studio aggregator.</summary>
     GDStudio
 }
 
@@ -137,34 +135,11 @@ public partial class SubsonicSettings
     public DownloadMode DownloadMode { get; set; } = DownloadMode.Track;
     
     /// <summary>
-    /// Music service(s) to use (default: Deezer)
+    /// Music service to use (default: Deezer)
     /// Environment variable: MUSIC_SERVICE
-    /// Values: "Deezer", "Qobuz", "Tidal", "Yandex", "GDStudio", "AppleMusic", "SquidWTF" (deprecated).
-    /// Several can be combined with "," (e.g. "Deezer,Qobuz"): searches are merged and
-    /// providers without valid credentials are skipped with a warning.
+    /// Values: "Deezer", "Qobuz", "Tidal", "Yandex", "SquidWTF" (deprecated)
     /// </summary>
-    [Microsoft.Extensions.Configuration.ConfigurationKeyName("MusicService")]
-    public string MusicServices { get; set; } = MusicService.Deezer.ToString();
-
-    /// <summary>
-    /// Parses a ","-separated list (also "|" or ";") (case-insensitive) into distinct services; unrecognised
-    /// entries are reported in <paramref name="unknown"/>. Blank input means Deezer.
-    /// </summary>
-    public static List<MusicService> ParseMusicServices(string? value, out List<string> unknown)
-    {
-        unknown = [];
-        var result = new List<MusicService>();
-        foreach (var part in (value ?? "").Split(['|', ',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (Enum.TryParse<MusicService>(part, ignoreCase: true, out var svc) && Enum.IsDefined(svc))
-            {
-                if (!result.Contains(svc)) result.Add(svc);
-            }
-            else unknown.Add(part);
-        }
-        if (result.Count == 0 && unknown.Count == 0) result.Add(MusicService.Deezer);
-        return result;
-    }
+    public MusicService MusicService { get; set; } = MusicService.Deezer;
     
     /// <summary>
     /// Storage mode for downloaded files (default: Permanent)
@@ -204,15 +179,6 @@ public partial class SubsonicSettings
     /// the track will be re-downloaded in FLAC
     /// </summary>
     public bool AutoUpgradeQuality { get; set; } = false;
-
-    /// <summary>
-    /// What to do when a download would land on a file name that already exists (default: false)
-    /// Environment variable: ALLOW_BITRATE_UPGRADE
-    /// false: skip the download and keep the existing file.
-    /// true: download only if the new track has a higher bitrate than the existing file,
-    /// and replace the file once the download completes.
-    /// </summary>
-    public bool AllowBitrateUpgrade { get; set; } = false;
     
     /// <summary>
     /// Template for organizing downloaded files into folders (default: {artist}/{album}/{track} - {title})

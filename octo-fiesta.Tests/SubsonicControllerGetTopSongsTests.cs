@@ -223,41 +223,6 @@ public class SubsonicControllerGetTopSongsTests
     }
 
     [Fact]
-    public async Task GetTopSongs_KeepsCollaborationsWhereArtistIsNotLeadingCredit()
-    {
-        _mockMetadataService
-            .Setup(x => x.SearchSongsAsync(It.IsAny<string>(), It.IsAny<int>()))
-            .ReturnsAsync(new List<Song>
-            {
-                External("Je t'aime moi non plus", artist: "Jane Birkin, Serge Gainsbourg"),
-                External("Qi-Li-Xiang", artist: "Jay Chou, 周杰伦")
-            });
-
-        var controller = CreateController(
-            new Dictionary<string, string>
-            {
-                { "artist", "Serge Gainsbourg" },
-                { "f", "json" }
-            },
-            NavidromeTopSongs());
-
-        var titles = TitlesOf(await controller.GetTopSongs());
-
-        Assert.Contains("Je t'aime moi non plus", titles);
-
-        var controllerChinese = CreateController(
-            new Dictionary<string, string>
-            {
-                { "artist", "周杰伦" },
-                { "f", "json" }
-            },
-            NavidromeTopSongs());
-
-        var titlesChinese = TitlesOf(await controllerChinese.GetTopSongs());
-        Assert.Contains("Qi-Li-Xiang", titlesChinese);
-    }
-
-    [Fact]
     public async Task GetTopSongs_DoesNotDuplicateATitleAlreadyInTheLibrary()
     {
         // Same song, different casing and a curly apostrophe: StringNormalizer

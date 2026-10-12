@@ -29,6 +29,8 @@ This fork extends the upstream project with the following features and integrati
 - **More robust Subsonic compatibility**: `reportPlayback` accepts both legacy `id` and OpenSubsonic `mediaId` values, external song IDs are resolved to local IDs when possible, and missing lyrics responses are normalised for clients that do not handle Subsonic error 70.
 - **Qobuz application credentials**: `QOBUZ_APP_ID` and `QOBUZ_APP_SECRET` can be supplied to avoid scraping Qobuz's web bundle for these values.
 
+Provider lists, GDStudio, per-provider download folders, optional bitrate replacement, and optional provider labels are documented in [Fork provider features](docs/fork-providers.md). Existing single-provider configurations and automatic alacarte integration continue to work.
+
 The fork also includes automated upstream synchronisation/build workflows, expanded regression coverage, and a `scripts/library_rename_to_qobuz.py` migration helper for existing libraries.
 
 The upstream sync workflow requires a repository secret named `SYNC_TOKEN`. The token needs write access to contents, pull requests, and workflows because sync commits may update files under `.github/workflows/`.
@@ -41,7 +43,6 @@ The upstream sync workflow requires a repository secret named `SYNC_TOKEN`. The 
 | [Qobuz](https://www.qobuz.com/) | Yes | FLAC 24-bit/192kHz | Yes |
 | [Tidal](https://tidal.com/) | Yes | FLAC 24-bit/192kHz | Yes |
 | [Yandex Music](https://music.yandex.ru) | Yes | FLAC 16-bit | Yes |
-| [GD Studio](https://music-api.gdstudio.xyz) | Yes | up to FLAC (source-dependent) | No |
 | [SquidWTF](https://squid.wtf/) (Qobuz, Tidal) | No | Source-dependent | Tidal |
 | [Apple Music](https://music.apple.com/) via [alacarte](https://github.com/sosjalapeno/alacarte) | An alacarte instance | ALAC / FLAC 24-bit/192kHz | Yes |
 
@@ -58,15 +59,7 @@ AppleMusic__AlacarteUrl=http://alacarte-host:7373
 AppleMusic__ApiToken=<token from alacarte's settings>
 ```
 
-Then add `AppleMusic` to `MUSIC_SERVICE` (`Subsonic__MusicService`), e.g. `MUSIC_SERVICE=Deezer,AppleMusic`: search shows both, and each song, album and playlist downloads through its own provider. Like every provider it is only used when listed; setting the two values alone logs a warning and is ignored. Set `MUSIC_SERVICE=AppleMusic` to use Apple Music on its own. alacarte and octo-fiesta must mount the same music folder.
-
-If alacarte's music folder isn't the same folder as your general `DOWNLOAD_PATH` (for example, alacarte already manages its own library layout, or the two containers only share a subfolder), point Apple Music at it directly instead of moving `DOWNLOAD_PATH`:
-
-```env
-AppleMusic__DownloadPath=/music
-```
-
-This — and the equivalent `<PROVIDER>__DownloadPath` for any other provider (`Deezer__DownloadPath`, `Qobuz__DownloadPath`, `Tidal__DownloadPath`, `Yandex__DownloadPath`, `SquidWTF__DownloadPath`) — overrides `Library__DownloadPath` for that provider only; every other provider keeps using the shared path. `AppleMusic__DownloadPath` must still resolve, inside the container, to the exact same folder alacarte itself writes into (i.e. both containers mount it the same way) — this setting only lets that folder differ from the one everything else downloads into, it doesn't remove the requirement that octo-fiesta and alacarte agree on it.
+With these set, Apple Music is offered next to your `Subsonic__MusicService` provider: search shows both, and each song, album and playlist downloads through its own provider. Set `Subsonic__MusicService=AppleMusic` to use Apple Music on its own. alacarte and octo-fiesta must mount the same music folder.
 
 ## Compatible Clients
 
@@ -108,14 +101,6 @@ See the [Installation](https://github.com/V1ck3s/octo-fiesta/wiki/Installation) 
 
 See the [Configuration](https://github.com/V1ck3s/octo-fiesta/wiki/Configuration) wiki page for all available settings.
 
-### Multiple providers
-
-`MUSIC_SERVICE` accepts several services separated by `,` (`|` and `;` also work), e.g. `MUSIC_SERVICE=Deezer,Qobuz`.
-
-- Searches go to every provider in parallel and the results are interleaved, so each provider is represented.
-- Songs, albums and artists keep the provider in their id, so streaming and downloads are routed back to the right one.
-- A provider without credentials (e.g. no `Deezer__Arl`) is skipped with a warning at startup, and a provider that fails during a search is skipped for that request. If only one service is listed it is always used; if none is usable the app refuses to start.
-
 ### Getting Credentials
 
 - [Getting Deezer Credentials (ARL Token)](https://github.com/V1ck3s/octo-fiesta/wiki/Getting-Deezer-Credentials-(ARL-Token))
@@ -123,30 +108,6 @@ See the [Configuration](https://github.com/V1ck3s/octo-fiesta/wiki/Configuration
 - [Getting Tidal Credentials (OAuth Tokens)](https://github.com/V1ck3s/octo-fiesta/wiki/Getting-Tidal-Credentials-(OAuth-Tokens))
 - **SquidWTF** (deprecated): No credentials needed
 - **Yandex**: credentials may be obtained by authorizing official Yandex Music OAuth client [here](https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d). After authorization OAuth token will appear in the address bar in `#access_token=` fragment
-
-### GDStudio
-
-[GD Studio/GD音乐台](https://music-api.gdstudio.xyz) needs no credentials. Set `MUSIC_SERVICE=GDStudio`. Tracks, albums and artists are supported (albums and artists are derived from search results and identified by name); playlists are not.
-
-| Variable | Default | Description |
-|---|---|---|
-| `GDStudio__Source` (`GDSTUDIO_SOURCE`) | `netease` | Upstream source(s), comma separated, e.g. `netease,joox`, or `apple`. Any value the API accepts works (not validated). Each source is queried separately (N sources = N requests per search) and results are merged; a source that fails or exceeds `GDStudio__TimeoutSeconds` (default 8) is logged as an error and skipped. |
-| `GDStudio__TimeoutSeconds` (`GDSTUDIO_TIMEOUT_SECONDS`) | `8` | Per-source timeout for search/metadata calls (3x for the first call to each source). |
-| `GDStudio__Br` (`GDSTUDIO_BR`) | `999` | Audio quality, see below. |
-| `GDStudio__Api` (`GDSTUDIO_API`) | `https://music-api.gdstudio.xyz/api.php` | API endpoint. |
-| `GDStudio__Proxy` (`GDSTUDIO_PROXY`) | empty | Proxy for all API and download requests: `http://`, `https://` or `socks5://` URL, e.g. `socks5://127.0.0.1:1080`. |
-
-Available `br` values:
-
-| br | Quality |
-|---|---|
-| `128` | 128 kbps |
-| `192` | 192 kbps |
-| `320` | 320 kbps |
-| `740` | 16-bit lossless |
-| `999` | 24-bit lossless |
-
-If the requested `br` is not supported or the API returns an empty response, the next lower value is tried once (e.g. `999` falls back to `740` only, then the download fails). `128` has no fallback. The API is rate limited to about 50 requests per 5 minutes.
 
 ## Architecture
 
@@ -210,5 +171,4 @@ GPL-3.0
 - [Qobuz](https://www.qobuz.com/) - Hi-Res music streaming service
 - [SquidWTF](https://squid.wtf/) - Third-party music API service
 - [Yandex Music](https://music.yandex.com) - Music streaming service
-- [GD Studio/GD音乐台](https://music-api.gdstudio.xyz) - Third-party music API service
 - [Subsonic API](http://www.subsonic.org/pages/api.jsp) - The API specification

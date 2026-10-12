@@ -13,9 +13,11 @@ public class MusicServicesSettingTests
             .AddInMemoryCollection(new Dictionary<string, string?> { ["Subsonic:MusicService"] = "Deezer,Qobuz" })
             .Build();
 
+        octo_fiesta.Services.Composite.ProviderFeature.NormalizeConfiguration(config);
         var settings = config.GetSection("Subsonic").Get<SubsonicSettings>()!;
 
         Assert.Equal("Deezer,Qobuz", settings.MusicServices);
+        Assert.Equal(MusicService.Deezer, settings.MusicService);
     }
 
     [Fact]

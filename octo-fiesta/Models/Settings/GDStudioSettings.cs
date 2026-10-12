@@ -34,6 +34,9 @@ public class GDStudioSettings
     /// </summary>
     public string? Proxy { get; set; }
 
+    /// <summary>Explicit artist aliases for catalogue romanizations; search text never changes artist tags.</summary>
+    public Dictionary<string, string[]> ArtistAliases { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// Full URL of the API endpoint. Default: https://music-api.gdstudio.xyz/api.php
     /// </summary>

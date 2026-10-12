@@ -30,12 +30,14 @@ public class BaseDownloadServiceDedupeTests : IDisposable
     private FakeDedupeDownloadService BuildService(
         Mock<ILocalLibraryService> localLibMock,
         Mock<IMusicMetadataService> metaMock,
-        string? folderTemplate = null)
+        string? folderTemplate = null,
+        bool allowBitrateUpgrade = false)
     {
         var settings = new SubsonicSettings
         {
             FolderTemplate = folderTemplate ?? "{artist}/{album}/{track}. {title}",
-            StorageMode = StorageMode.Permanent
+            StorageMode = StorageMode.Permanent,
+            AllowBitrateUpgrade = allowBitrateUpgrade
         };
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -270,12 +272,67 @@ public class BaseDownloadServiceDedupeTests : IDisposable
         var path = await service.DownloadSongAsync("fake", "3");
 
         Assert.Equal("race-written", File.ReadAllText(path));
+        localLibMock.Verify(x => x.RegisterDownloadedSongAsync(It.IsAny<Song>(), path, null, null), Times.Once);
+    }
+
+    [Theory]
+    [InlineData(128, "MP3_128", false)]
+    [InlineData(320, "MP3_320", false)]
+    [InlineData(128, "MP3_128", true)]
+    [InlineData(320, "MP3_320", true)]
+    public async Task ExistingUnmappedFile_UpgradeChecksActualAudioAndRecordsStoredQuality(int incomingBitrate, string expectedQuality, bool mapped)
+    {
+        var directory = Path.Combine(_testDownloadPath, "Artist", "Album");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "01. Track.mp3");
+        File.WriteAllBytes(path, DownloadFileStoreTests.Mp3());
+        var local = new Mock<ILocalLibraryService>();
+        if (mapped) local.Setup(l => l.GetMappingForExternalSongAsync("fake", "1")).ReturnsAsync(new LocalSongMapping
+        {
+            ExternalId = "1", ExternalProvider = "fake", LocalPath = path, DownloadedQuality = "MP3_128"
+        });
+        var metadata = new Mock<IMusicMetadataService>();
+        metadata.Setup(m => m.GetSongAsync("fake", "1")).ReturnsAsync(new Song
+        {
+            Title = "Track", Artist = "Artist", Album = "Album", Track = 1,
+            ExternalId = "1", ExternalProvider = "fake"
+        });
+        var service = BuildService(local, metadata, allowBitrateUpgrade: true);
+        service.IncomingBitrate = incomingBitrate;
+        Assert.Equal(path, await service.DownloadSongAsync("fake", "1"));
+        Assert.Equal(expectedQuality, DownloadFileStore.ReadQuality(path));
+        local.Verify(x => x.RegisterDownloadedSongAsync(It.IsAny<Song>(), path, expectedQuality, null), Times.Once);
+    }
+
+    [Fact]
+    public async Task ExistingLossyFile_UpgradeToFlacReplacesAcrossExtensions()
+    {
+        var directory = Path.Combine(_testDownloadPath, "Artist", "Album");
+        Directory.CreateDirectory(directory);
+        var oldPath = Path.Combine(directory, "01. Track.mp3");
+        File.WriteAllBytes(oldPath, DownloadFileStoreTests.Mp3());
+        var local = new Mock<ILocalLibraryService>();
+        var metadata = new Mock<IMusicMetadataService>();
+        metadata.Setup(m => m.GetSongAsync("fake", "1")).ReturnsAsync(new Song
+        {
+            Title = "Track", Artist = "Artist", Album = "Album", Track = 1,
+            ExternalId = "1", ExternalProvider = "fake"
+        });
+        var service = BuildService(local, metadata, allowBitrateUpgrade: true);
+        service.RealFlac = true;
+        var path = await service.DownloadSongAsync("fake", "1");
+        Assert.Equal(Path.ChangeExtension(oldPath, ".flac"), path);
+        Assert.True(File.Exists(path));
+        Assert.False(File.Exists(oldPath));
+        local.Verify(l => l.RegisterDownloadedSongAsync(It.IsAny<Song>(), path, "FLAC", null), Times.Once);
     }
 
     private sealed class FakeDedupeDownloadService : BaseDownloadService
     {
         public bool DownloadTrackCalled { get; private set; }
         public bool CreateFileBeforeWrite { get; set; }
+        public int? IncomingBitrate { get; set; }
+        public bool RealFlac { get; set; }
 
         protected override string ProviderName => "fake";
 
@@ -307,6 +364,12 @@ public class BaseDownloadServiceDedupeTests : IDisposable
                 Directory.CreateDirectory(Path.GetDirectoryName(racePath)!);
                 File.WriteAllText(racePath, "race-written");
             }
+
+            if (RealFlac)
+                return Task.FromResult(new DownloadResult(new MemoryStream(DownloadFileStoreTests.Flac()), ".flac", "FLAC"));
+
+            if (IncomingBitrate is { } bitrate)
+                return Task.FromResult(new DownloadResult(new MemoryStream(DownloadFileStoreTests.Mp3(bitrate)), ".mp3", $"MP3_{bitrate}"));
 
             return Task.FromResult(new DownloadResult(
                 new MemoryStream(new byte[] { 0x66, 0x4C, 0x61, 0x43 }),

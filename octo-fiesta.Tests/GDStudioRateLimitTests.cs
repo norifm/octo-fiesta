@@ -71,7 +71,7 @@ public class GDStudioRateLimitTests
         var songs = await Service(handler, "netease,joox").SearchSongsAsync("q");
 
         Assert.Equal(2, songs.Count);
-        Assert.Equal(["netease~1", "joox~1"], songs.Select(s => s.ExternalId).OrderByDescending(x => x).ToArray());
+        Assert.Equal(["netease~1", "joox~1"], songs.Select(s => s.ExternalId!).OrderByDescending(x => x).ToArray());
     }
 
     // ---- artist page: one keyword search (paged) instead of one lookup per album ----
@@ -105,7 +105,7 @@ public class GDStudioRateLimitTests
     private static string Id(string s) => Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(s)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     [Fact]
-    public async Task ArtistAlbums_PagesThroughTheKeywordSearch_KeepsOnlyThatArtist_AndAlbumsOpenWithoutRequests()
+    public async Task ArtistAlbums_PagesThroughTheKeywordSearch_AlbumOpeningFetchesItsOwnListing()
     {
         // page 1 is full (99) and mixes in another artist; once it is full, pages 2 and 3 go out together
         var handler = new PagedHandler(page => Json(page == "1"
@@ -118,12 +118,14 @@ public class GDStudioRateLimitTests
         var album = Assert.Single(albums);
         Assert.Equal("Al", album.Title);
         Assert.Equal(62, album.SongCount);
-        Assert.Equal(["1", "2", "3"], handler.Pages.OrderBy(x => x).ToArray());
+        Assert.Equal(["1", "2"], handler.Pages.OrderBy(x => x).ToArray());
 
         var opened = await service.GetAlbumAsync("gdstudio", album.ExternalId!);
 
         Assert.Equal(62, opened!.Songs.Count);
-        Assert.Equal(3, handler.Pages.Count); // opening the album made no request
+        Assert.Equal(4, handler.Pages.Count); // album search uses separate cached query keys
+        await service.GetAlbumAsync("gdstudio", album.ExternalId!);
+        Assert.Equal(4, handler.Pages.Count); // repeating the album lookup uses the cache
     }
 
     [Fact]
