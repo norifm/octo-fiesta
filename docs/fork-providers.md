@@ -1,5 +1,7 @@
 # Fork provider features
 
+The provider lists, GDStudio integration, provider-specific folders, and bitrate replacement originated in [Derek Zhu’s](https://github.com/hereisderek) contributions in PRs [#22](https://github.com/norifm/octo-fiesta/pull/22), [#23](https://github.com/norifm/octo-fiesta/pull/23), [#24](https://github.com/norifm/octo-fiesta/pull/24), and [#25](https://github.com/norifm/octo-fiesta/pull/25). The consolidated implementation preserves his original commits.
+
 These features are optional. Existing single-provider `MUSIC_SERVICE` values, the default download folder, automatic Apple Music integration when alacarte is configured, playlist support, and `AUTO_UPGRADE_QUALITY` remain available. Settings below are added by the fork; upstream startup and controller behavior are preserved for existing configurations.
 
 ## Multiple providers
