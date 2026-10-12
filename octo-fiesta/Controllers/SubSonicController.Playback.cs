@@ -11,6 +11,9 @@ public partial class SubsonicController
     private IExternalCoverArtService? GetExternalCoverArtService()
         => HttpContext.RequestServices?.GetService<IExternalCoverArtService>();
 
+    private Task MarkExternalAlbumDownloadStartedAsync(string provider, string externalId)
+        => GetExternalCoverArtService()?.MarkAlbumDownloadStartedAsync(provider, externalId) ?? Task.CompletedTask;
+
     /// <summary>
     /// Reports playback state while resolving external song IDs to local IDs.
     /// </summary>

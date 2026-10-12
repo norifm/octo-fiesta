@@ -36,6 +36,7 @@ public static class ForkFeatures
         services.AddSingleton<IExternalAlbumAvailabilityService, ExternalAlbumAvailabilityService>();
         services.AddSingleton<IExternalCoverArtService, ExternalCoverArtService>();
         services.AddSingleton<INavidromeUploadService, NavidromeUploadService>();
+        Remote.RemoteFeature.AddNoriRemote(services);
 
         return services;
     }
