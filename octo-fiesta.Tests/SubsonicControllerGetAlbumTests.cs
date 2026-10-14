@@ -74,7 +74,8 @@ public class SubsonicControllerGetAlbumTests
     private static SubsonicController CreateController(
         Mock<IMusicMetadataService> metadataServiceMock,
         bool asXml,
-        string? navidromeJson = null)
+        string? navidromeJson = null,
+        ExternalAlbumMergeCache? mergeCache = null)
     {
         var responseBuilder = new SubsonicResponseBuilder();
         var settings = Options.Create(new SubsonicSettings { Url = "http://localhost:4533" });
@@ -118,7 +119,8 @@ public class SubsonicControllerGetAlbumTests
             new SubsonicModelMapper(responseBuilder, new Mock<ILogger<SubsonicModelMapper>>().Object),
             proxyService,
             new Mock<IHostApplicationLifetime>().Object,
-            new Mock<ILogger<SubsonicController>>().Object);
+            new Mock<ILogger<SubsonicController>>().Object,
+            albumMergeCache: mergeCache);
 
         var httpContext = new DefaultHttpContext();
         httpContext.Request.QueryString = asXml
@@ -348,5 +350,122 @@ public class SubsonicControllerGetAlbumTests
 
         Assert.Equal(new[] { "Oblivion" }, GetMergedSongTitles(result));
         metadataServiceMock.Verify(x => x.GetAlbumAsync("deezer", "999"), Times.Never);
+    }
+
+    private const string NavidromeMoonSafariJson =
+        "{\"subsonic-response\":{\"status\":\"ok\",\"album\":{\"id\":\"local-album-3\",\"name\":\"Moon Safari\"," +
+        "\"artist\":\"Air\",\"songCount\":2,\"duration\":500,\"song\":[" +
+        "{\"id\":\"s1\",\"title\":\"Sexy Boy\",\"discNumber\":1,\"track\":2,\"duration\":300}," +
+        "{\"id\":\"s2\",\"title\":\"All I Need\",\"discNumber\":1,\"track\":3,\"duration\":200}]}}}";
+
+    private static Album Candidate(string id, string title, string artist = "Air") => new()
+    {
+        Id = $"ext-deezer-album-{id}",
+        Title = title,
+        Artist = artist,
+        ExternalProvider = "deezer",
+        ExternalId = id
+    };
+
+    private static Song RemoteSong(string title, int track) => new()
+    {
+        Title = title,
+        Track = track,
+        DiscNumber = 1,
+        Duration = 200,
+        ExternalProvider = "deezer",
+        ExternalId = $"r{track}"
+    };
+
+    private static Mock<IMusicMetadataService> MoonSafariProvider(params Album[] candidates)
+    {
+        var mock = new Mock<IMusicMetadataService>();
+        mock.Setup(x => x.SearchAlbumsAsync("Air Moon Safari", It.IsAny<int>())).ReturnsAsync(candidates.ToList());
+        return mock;
+    }
+
+    [Theory]
+    [InlineData("Moon Safari: Remixes, Rarities and Radio Sessions - EP")]
+    [InlineData("Moon Safari: Live from the Kennedy Center")]
+    [InlineData("Moon Safari (Anyma Remix) - Single")]
+    public async Task GetAlbum_WhenCandidateIsAnotherReleaseWithTheSameTitleStart_KeepsItsSongsOut(string title)
+    {
+        var provider = MoonSafariProvider(Candidate("1", title));
+        provider.Setup(x => x.GetAlbumAsync("deezer", "1")).ReturnsAsync(new Album
+        {
+            Songs = new List<Song> { RemoteSong("Sexy Boy (Live)", 1) }
+        });
+
+        var result = await CreateController(provider, asXml: false, navidromeJson: NavidromeMoonSafariJson).GetAlbum();
+
+        Assert.Equal(new[] { "Sexy Boy", "All I Need" }, GetMergedSongTitles(result));
+        provider.Verify(x => x.GetAlbumAsync("deezer", "1"), Times.Never);
+    }
+
+    [Fact]
+    public async Task GetAlbum_WhenAlbumIsOnlyPartlyOwned_AppendsTheMissingTracksOfTheSameAlbum()
+    {
+        var provider = MoonSafariProvider(Candidate("2", "Moon Safari"));
+        provider.Setup(x => x.GetAlbumAsync("deezer", "2")).ReturnsAsync(new Album
+        {
+            Songs = new List<Song> { RemoteSong("La femme d'argent", 1), RemoteSong("Sexy Boy", 2), RemoteSong("All I Need", 3) }
+        });
+
+        var result = await CreateController(provider, asXml: false, navidromeJson: NavidromeMoonSafariJson).GetAlbum();
+
+        Assert.Equal(new[] { "La femme d'argent", "Sexy Boy", "All I Need" }, GetMergedSongTitles(result));
+    }
+
+    [Fact]
+    public async Task GetAlbum_WhenSameTitleCandidateSharesNoTracks_KeepsItsSongsOut()
+    {
+        var provider = MoonSafariProvider(Candidate("3", "Moon Safari"));
+        provider.Setup(x => x.GetAlbumAsync("deezer", "3")).ReturnsAsync(new Album
+        {
+            Songs = new List<Song> { RemoteSong("Something Else", 1) }
+        });
+
+        var result = await CreateController(provider, asXml: false, navidromeJson: NavidromeMoonSafariJson).GetAlbum();
+
+        Assert.Equal(new[] { "Sexy Boy", "All I Need" }, GetMergedSongTitles(result));
+    }
+
+    [Fact]
+    public async Task GetAlbum_WithCache_AsksTheProviderOnceAndMergesOnTheNextView()
+    {
+        var provider = MoonSafariProvider(Candidate("2", "Moon Safari"));
+        provider.Setup(x => x.GetAlbumAsync("deezer", "2")).ReturnsAsync(new Album
+        {
+            Songs = new List<Song> { RemoteSong("La femme d'argent", 1), RemoteSong("Sexy Boy", 2) }
+        });
+        var cache = new ExternalAlbumMergeCache(new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 16 }));
+
+        var first = await CreateController(provider, asXml: false, navidromeJson: NavidromeMoonSafariJson, mergeCache: cache).GetAlbum();
+        var second = await CreateController(provider, asXml: false, navidromeJson: NavidromeMoonSafariJson, mergeCache: cache).GetAlbum();
+
+        Assert.Equal(new[] { "La femme d'argent", "Sexy Boy", "All I Need" }, GetMergedSongTitles(first));
+        Assert.Equal(new[] { "La femme d'argent", "Sexy Boy", "All I Need" }, GetMergedSongTitles(second));
+        provider.Verify(x => x.SearchAlbumsAsync("Air Moon Safari", It.IsAny<int>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GetAlbum_WithCache_DoesNotWaitForASlowProviderOnLaterViews()
+    {
+        var release = new TaskCompletionSource();
+        var provider = MoonSafariProvider();
+        provider.Setup(x => x.SearchAlbumsAsync("Air Moon Safari", It.IsAny<int>()))
+            .Returns(async () => { await release.Task; return new List<Album>(); });
+        var cache = new ExternalAlbumMergeCache(new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 16 }));
+
+        var viewing = CreateController(provider, asXml: false, navidromeJson: NavidromeMoonSafariJson, mergeCache: cache).GetAlbum();
+        release.SetResult();
+        await viewing;
+        var started = DateTime.UtcNow;
+        await CreateController(provider, asXml: false, navidromeJson: NavidromeMoonSafariJson, mergeCache: cache).GetAlbum();
+
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(1));
+        provider.Verify(x => x.SearchAlbumsAsync("Air Moon Safari", It.IsAny<int>()), Times.Once);
     }
 }

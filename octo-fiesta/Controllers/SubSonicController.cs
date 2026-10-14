@@ -31,6 +31,7 @@ public partial class SubsonicController : ControllerBase
     private readonly SubsonicProxyService _proxyService;
     private readonly PlaylistSyncService? _playlistSyncService;
     private readonly ILyricsService? _lyricsService;
+    private readonly ExternalAlbumMergeCache? _albumMergeCache;
     private readonly ILogger<SubsonicController> _logger;
     private readonly IHostApplicationLifetime _hostApplicationLifetime;
 
@@ -46,8 +47,10 @@ public partial class SubsonicController : ControllerBase
         IHostApplicationLifetime hostApplicationLifetime,
         ILogger<SubsonicController> logger,
         PlaylistSyncService? playlistSyncService = null,
-        ILyricsService? lyricsService = null)
+        ILyricsService? lyricsService = null,
+        ExternalAlbumMergeCache? albumMergeCache = null)
     {
+        _albumMergeCache = albumMergeCache;
         _subsonicSettings = subsonicSettings.Value;
         _metadataService = metadataService;
         _localLibraryService = localLibraryService;
@@ -615,6 +618,70 @@ public partial class SubsonicController : ControllerBase
         return HasEditionSuffix(candidateKey, albumKey) || HasEditionSuffix(albumKey, candidateKey);
     }
 
+    // How long an album page waits for a provider the first time it is asked about; after
+    // that the answer is cached and the page never waits.
+    private static readonly TimeSpan FirstLookupBudget = TimeSpan.FromSeconds(2);
+
+    private async Task<Album?> FindExternalAlbumAsync(string artistName, string albumName, List<string> localTitles)
+    {
+        Task<Album?> Resolve() => ResolveExternalAlbumAsync(artistName, albumName, localTitles);
+
+        if (_albumMergeCache == null)
+        {
+            return await Resolve();
+        }
+
+        var key = $"{StringNormalizer.CreateComparisonKey(artistName)}|{StringNormalizer.CreateComparisonKey(albumName)}|{localTitles.Count}";
+        if (_albumMergeCache.TryGet(key, out var cached, out var stale))
+        {
+            if (stale)
+            {
+                ObserveBackground(_albumMergeCache.ResolveAsync(key, Resolve));
+            }
+            return cached;
+        }
+
+        var lookup = _albumMergeCache.ResolveAsync(key, Resolve);
+        ObserveBackground(lookup);
+        var first = await Task.WhenAny(lookup, Task.Delay(FirstLookupBudget));
+        return first == lookup && lookup.IsCompletedSuccessfully ? lookup.Result : null;
+    }
+
+    private void ObserveBackground(Task task) =>
+        task.ContinueWith(
+            t => _logger.LogWarning(t.Exception?.GetBaseException(), "Album merge lookup failed"),
+            TaskContinuationOptions.OnlyOnFaulted);
+
+    /// <summary>
+    /// The provider album this library album is, or null: the same artist, the same title
+    /// (or the title plus an edition suffix) and tracks in common with the library album.
+    /// </summary>
+    private async Task<Album?> ResolveExternalAlbumAsync(string artistName, string albumName, List<string> localTitles)
+    {
+        var externalAlbumsSearch = await _metadataService.SearchAlbumsAsync($"{artistName} {albumName}", 5);
+
+        // Only a candidate credited to the same artist can be merged, otherwise a homonym
+        // such as "Gary Grimes" pours its tracks into an album by "Grimes".
+        var sameArtistCandidates = externalAlbumsSearch
+            .Where(c => IsSameArtistOrCollaboration(c.Artist, artistName))
+            .ToList();
+
+        var albumKey = StringNormalizer.CreateComparisonKey(albumName);
+        var exact = sameArtistCandidates.Where(c => StringNormalizer.CreateComparisonKey(c.Title) == albumKey).ToList();
+        var editions = sameArtistCandidates.Except(exact).Where(c => IsSameAlbumWithEditionSuffix(c.Title, albumName));
+
+        foreach (var candidate in exact.Concat(editions).Take(3))
+        {
+            var album = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
+            if (album != null && ExternalAlbumMatcher.SharesTracks(localTitles, album.Songs))
+            {
+                return album;
+            }
+        }
+
+        return null;
+    }
+
     private static bool HasEditionSuffix(string longer, string shorter)
     {
         if (!ExtendsAtWordBoundary(longer, shorter))
@@ -623,7 +690,8 @@ public partial class SubsonicController : ControllerBase
         }
 
         var suffix = longer[shorter.Length..].TrimStart();
-        return suffix.StartsWith('(') || suffix.StartsWith('[') || suffix.StartsWith('-') || suffix.StartsWith(':');
+        return (suffix.StartsWith('(') || suffix.StartsWith('[') || suffix.StartsWith('-') || suffix.StartsWith(':'))
+            && ExternalAlbumMatcher.IsEditionSuffix(suffix);
     }
 
     private static bool ExtendsAtWordBoundary(string longer, string shorter)
@@ -906,33 +974,14 @@ public partial class SubsonicController : ControllerBase
             return File(navidromeResult.Body, navidromeResult.ContentType ?? "application/json");
         }
 
-        var searchQuery = $"{artistName} {albumName}";
-        var externalAlbumsSearch = await _metadataService.SearchAlbumsAsync(searchQuery, 5);
-        Album? externalAlbum = null;
-
-        // Only a candidate credited to the same artist can be merged, otherwise a homonym
-        // such as "Gary Grimes" pours its tracks into an album by "Grimes".
-        var sameArtistCandidates = externalAlbumsSearch
-            .Where(c => IsSameArtistOrCollaboration(c.Artist, artistName))
-            .ToList();
-
-        var albumKey = StringNormalizer.CreateComparisonKey(albumName);
-        var match = sameArtistCandidates
-                .FirstOrDefault(c => StringNormalizer.CreateComparisonKey(c.Title) == albumKey)
-            ?? sameArtistCandidates
-                .FirstOrDefault(c => IsSameAlbumWithEditionSuffix(c.Title, albumName));
-
-        if (match != null)
-        {
-            externalAlbum = await _metadataService.GetAlbumAsync(match.ExternalProvider!, match.ExternalId!);
-        }
-
         var localSongTitles = new HashSet<string>();
+        var localTitles = new List<string>();
         foreach (var song in localSongs)
         {
             if (song is Dictionary<string, object> dict && dict.TryGetValue("title", out var titleObj))
             {
                 var title = titleObj?.ToString() ?? "";
+                localTitles.Add(title);
                 localSongTitles.Add(StringNormalizer.CreateComparisonKey(title));
                 localSongTitles.Add(StringNormalizer.CreateSongTitleDedupeKey(title));
             }
@@ -940,9 +989,12 @@ public partial class SubsonicController : ControllerBase
         foreach (var song in ChildElements(albumXml, "song"))
         {
             var title = song.Attribute("title")?.Value;
+            localTitles.Add(title ?? "");
             localSongTitles.Add(StringNormalizer.CreateComparisonKey(title));
             localSongTitles.Add(StringNormalizer.CreateSongTitleDedupeKey(title));
         }
+
+        var externalAlbum = await FindExternalAlbumAsync(artistName, albumName, localTitles);
 
         var newSongs = externalAlbum?.Songs
             .Where(s => !localSongTitles.Contains(StringNormalizer.CreateComparisonKey(s.Title))

@@ -136,8 +136,10 @@ public class AppleMusicMetadataService : IMusicMetadataService
     private static List<Album> NewAlbums(IEnumerable<AlacarteAlbum>? albums) =>
         albums?.Where(a => !a.InLibrary).Select(AppleMusicMapper.ToAlbum).ToList() ?? new();
 
+    // Unlike search3, this is what album pages match their own album against, so albums
+    // alacarte already has stay in: a partly downloaded one is still missing tracks.
     public async Task<List<Album>> SearchAlbumsAsync(string query, int limit = 20) =>
-        NewAlbums((await _client.SearchAsync(query, 0, limit, 0, 0))?.Albums);
+        (await _client.SearchAsync(query, 0, limit, 0, 0))?.Albums.Select(AppleMusicMapper.ToAlbum).ToList() ?? new();
 
     public async Task<List<Artist>> SearchArtistsAsync(string query, int limit = 20) =>
         (await _client.SearchAsync(query, 0, 0, limit, 0))?.Artists.Select(AppleMusicMapper.ToArtist).ToList() ?? new();

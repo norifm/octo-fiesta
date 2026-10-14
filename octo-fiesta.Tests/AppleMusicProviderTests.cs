@@ -78,6 +78,26 @@ public class AppleMusicProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task AlbumLookup_KeepsAlbumsAlreadyInTheLibrary()
+    {
+        var json = "{\"songs\":[],\"albums\":[{\"id\":\"10\",\"title\":\"Owned Album\",\"artist\":\"A\",\"inLibrary\":true},"
+            + "{\"id\":\"11\",\"title\":\"New Album\",\"artist\":\"A\",\"inLibrary\":false}],\"artists\":[],\"playlists\":[]}";
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync(() => new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(json) });
+        var factory = new Mock<IHttpClientFactory>();
+        factory.Setup(f => f.CreateClient(It.IsAny<string>()))
+            .Returns(new HttpClient(handler.Object) { BaseAddress = new Uri("http://alacarte/api/integration/v1/") });
+        var client = new AlacarteClient(factory.Object,
+            Options.Create(new AppleMusicSettings { AlacarteUrl = "http://alacarte", ApiToken = "t" }), NullLogger<AlacarteClient>.Instance);
+
+        var result = await new AppleMusicMetadataService(client).SearchAlbumsAsync("x");
+
+        Assert.Equal(new[] { "10", "11" }, result.Select(a => a.ExternalId));
+    }
+
+    [Fact]
     public void PlaylistSongs_UseThePlaylistAsAlbum_AndIdsRoundTrip()
     {
         var playlist = new AlacartePlaylist("pl.abc-def", "Mix", "Apple Music", null, 2, null, null,

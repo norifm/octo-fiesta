@@ -33,6 +33,7 @@ public static class ForkFeatures
             .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
         services.Configure<ExternalCoverSettings>(configuration.GetSection("ExternalCover"));
+        services.AddSingleton<ExternalAlbumMergeCache>();
         services.AddSingleton<ICoverArtTransformer, CoverArtTransformer>();
         services.AddSingleton<ICoverArtCache, CoverArtCache>();
         services.AddSingleton<IExternalAlbumAvailabilityService, ExternalAlbumAvailabilityService>();
