@@ -58,7 +58,7 @@ public class PlaylistSyncService
         _subsonicSettings = subsonicSettings.Value;
         _logger = logger;
         
-        _musicDirectory = configuration["Library:DownloadPath"] ?? "./downloads";
+        _musicDirectory = DownloadPathResolver.GetSharedPath(configuration);
         _playlistDirectory = Path.Combine(_musicDirectory, _subsonicSettings.PlaylistsDirectory ?? "playlists");
         
         // Ensure playlists directory exists
