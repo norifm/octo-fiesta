@@ -6,6 +6,32 @@ services:
     ports:
       - "5274:${INTERNAL_PORT:-8080}"
     environment:
+      # ===== NORIFM FORK SETTINGS (see .env.example and docs/fork-providers.md) =====
+      # Kept in one block so upstream syncs merge cleanly.
+      # MUSIC_SERVICE also takes GDStudio and AppleMusic, and several services combined with ","
+      # (e.g. Deezer,Qobuz): searches are merged, and services without credentials are skipped.
+      # Qobuz App ID / App Secret (optional): when BOTH are set, bundle.js scraping is skipped.
+      - Qobuz__AppId=${QOBUZ_APP_ID:-}
+      - Qobuz__AppSecret=${QOBUZ_APP_SECRET:-}
+      # External cover indicator
+      - ExternalCover__IndicatorSize=${EXTERNAL_COVER_INDICATOR_SIZE:-1}
+      - ExternalCover__IndicatorSaturation=${EXTERNAL_COVER_INDICATOR_SATURATION:-1}
+      - ExternalCover__IndicatorColor=${EXTERNAL_COVER_INDICATOR_COLOR:-0}
+      # Navidrome upload API (forked Navidrome only): POST /api/upload skips the library scan
+      - Subsonic__UseNavidromeUploadApi=${USE_NAVIDROME_UPLOAD_API:-false}
+      - Subsonic__NavidromeLibraryId=${NAVIDROME_LIBRARY_ID:-1}
+      - Subsonic__NavidromeUploadFolder=${NAVIDROME_UPLOAD_FOLDER:-}
+      - Subsonic__AllowBitrateUpgrade=${ALLOW_BITRATE_UPGRADE:-false}
+      - Subsonic__ShowExternalProviderInSuffix=${SHOW_EXTERNAL_PROVIDER_IN_SUFFIX:-false}
+      - GDStudio__Source=${GDSTUDIO_SOURCE:-netease}
+      - GDStudio__TimeoutSeconds=${GDSTUDIO_TIMEOUT_SECONDS:-8}
+      - GDStudio__Br=${GDSTUDIO_BR:-999}
+      - GDStudio__Api=${GDSTUDIO_API:-https://music-api.gdstudio.xyz/api.php}
+      - GDStudio__Proxy=${GDSTUDIO_PROXY:-}
+      # Empty values retain Library__DownloadPath. Mount nonempty paths separately.
+      - AppleMusic__DownloadPath=${APPLE_MUSIC_DOWNLOAD_PATH:-}
+      - GDStudio__DownloadPath=${GDSTUDIO_DOWNLOAD_PATH:-}
+      # ===== END NORIFM FORK SETTINGS =====
       - ASPNETCORE_ENVIRONMENT=Production
       # Internal listening port (must match the port in "ports" mapping above)
       - ASPNETCORE_URLS=http://+:${INTERNAL_PORT:-8080}
@@ -19,9 +45,7 @@ services:
       - Subsonic__AdminUsername=${SUBSONIC_ADMIN_USERNAME:-}
       # Admin Password to perform actions on navidrome server that require admin permissions (optional)
       - Subsonic__AdminPassword=${SUBSONIC_ADMIN_PASSWORD:-}
-      # Music service to use: Deezer, Qobuz, Tidal, Yandex, GDStudio, AppleMusic, or SquidWTF (deprecated) (default: Deezer)
-      # Several can be combined with "," (e.g. Deezer,Qobuz): searches are merged, and services
-      # without credentials are skipped with a warning.
+      # Music service to use: Deezer, Qobuz, Tidal, Yandex, or SquidWTF (deprecated) (default: Deezer)
       - Subsonic__MusicService=${MUSIC_SERVICE:-Deezer}
       # Storage mode: Permanent (saved to library), Cache (temporary, auto-cleanup)
       - Subsonic__StorageMode=${STORAGE_MODE:-Permanent}
@@ -43,16 +67,6 @@ services:
       # Folder template for organizing downloaded files (default: {artist}/{album}/{track} - {title})
       # Available placeholders: {artistLetter}, {artist}, {album}, {title}, {track}, {disc}, {year}, {genre}, {quality}
       - Subsonic__FolderTemplate=${FOLDER_TEMPLATE}
-      # ===== NAVIDROME UPLOAD API (forked Navidrome only) =====
-      # Use the custom POST /api/upload endpoint to skip the library scan
-      - Subsonic__UseNavidromeUploadApi=${USE_NAVIDROME_UPLOAD_API:-false}
-      - Subsonic__NavidromeLibraryId=${NAVIDROME_LIBRARY_ID:-1}
-      - Subsonic__NavidromeUploadFolder=${NAVIDROME_UPLOAD_FOLDER:-}
-
-      # ===== EXTERNAL COVER INDICATOR =====
-      - ExternalCover__IndicatorSize=${EXTERNAL_COVER_INDICATOR_SIZE:-1}
-      - ExternalCover__IndicatorSaturation=${EXTERNAL_COVER_INDICATOR_SATURATION:-1}
-      - ExternalCover__IndicatorColor=${EXTERNAL_COVER_INDICATOR_COLOR:-0}
       
       # ===== DEEZER SETTINGS =====
       # Deezer ARL token (required if using Deezer)
@@ -72,10 +86,7 @@ services:
       - Qobuz__UserId=${QOBUZ_USER_ID:-}
       # Preferred audio quality: FLAC, FLAC_24_HIGH, FLAC_24_LOW, FLAC_16, MP3_320 (optional)
       - Qobuz__Quality=${QOBUZ_QUALITY:-}
-      # Qobuz App ID / App Secret (optional)
-      # When BOTH are set, bundle.js scraping is skipped and these values are used directly.
-      - Qobuz__AppId=${QOBUZ_APP_ID:-}
-      - Qobuz__AppSecret=${QOBUZ_APP_SECRET:-}
+      - Qobuz__DownloadPath=${QOBUZ_DOWNLOAD_PATH:-}
       
       # ===== TIDAL SETTINGS =====
       # Tokens come from the OAuth login: docker compose run --rm octo-fiesta --tidal-login
@@ -137,20 +148,7 @@ services:
       # Default: false
       # Available: true, false
       - Yandex__IncludeUnavailable=${YANDEX_INCLUDE_UNAVAILABLE_TRACKS:-false}
-
-      # ===== OPTIONAL FORK PROVIDER FEATURES (docs/fork-providers.md) =====
-      - Subsonic__AllowBitrateUpgrade=${ALLOW_BITRATE_UPGRADE:-false}
-      - Subsonic__ShowExternalProviderInSuffix=${SHOW_EXTERNAL_PROVIDER_IN_SUFFIX:-false}
-      - GDStudio__Source=${GDSTUDIO_SOURCE:-netease}
-      - GDStudio__TimeoutSeconds=${GDSTUDIO_TIMEOUT_SECONDS:-8}
-      - GDStudio__Br=${GDSTUDIO_BR:-999}
-      - GDStudio__Api=${GDSTUDIO_API:-https://music-api.gdstudio.xyz/api.php}
-      - GDStudio__Proxy=${GDSTUDIO_PROXY:-}
-      # Empty values retain Library__DownloadPath. Mount nonempty paths separately.
-      - Qobuz__DownloadPath=${QOBUZ_DOWNLOAD_PATH:-}
       - Yandex__DownloadPath=${YANDEX_DOWNLOAD_PATH:-}
-      - AppleMusic__DownloadPath=${APPLE_MUSIC_DOWNLOAD_PATH:-}
-      - GDStudio__DownloadPath=${GDSTUDIO_DOWNLOAD_PATH:-}
     volumes:
       - ${DOWNLOAD_PATH:-./downloads}:/app/downloads
       # Host folder backing a per-provider download path, one per provider you redirect.
