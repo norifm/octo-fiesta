@@ -190,7 +190,6 @@ public partial class SubsonicController : ControllerBase
         try
         {
             await MarkExternalAlbumDownloadStartedAsync(provider!, externalId!);
-
             // The download is deliberately not tied to RequestAborted. Nothing is sent to the
             // client until the file is complete, so a client that gives up waiting would kill
             // the download, drop the partial file, and restart from zero on every retry. Only
@@ -334,17 +333,12 @@ public partial class SubsonicController : ControllerBase
         var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
 
         // Local track, or lyrics feature disabled: let the real Subsonic server answer.
-        // Feishin (and similar) crash on Subsonic "data not found"; return an empty lyrics list.
         if (!isExternal || _lyricsService is not { Enabled: true })
         {
             try
             {
                 var result = await _proxyService.RelayAsync("rest/getLyricsBySongId", parameters);
-                if (IsSubsonicDataNotFound(result.Body, format))
-                {
-                    return _responseBuilder.CreateLyricsBySongIdResponse(format, null);
-                }
-
+                if (IsSubsonicDataNotFound(result.Body, format)) return _responseBuilder.CreateLyricsBySongIdResponse(format, null); // Feishin crashes on "data not found"
                 var contentType = result.ContentType ?? $"application/{format}";
                 return File(result.Body, contentType);
             }
@@ -618,113 +612,6 @@ public partial class SubsonicController : ControllerBase
         return HasEditionSuffix(candidateKey, albumKey) || HasEditionSuffix(albumKey, candidateKey);
     }
 
-    /// <summary>
-    /// The library album holding a downloaded track of this provider album, or null. Only our
-    /// own mappings are read, and the library album must carry the provider album's title,
-    /// so a track shared with another release does not pull in that release's album.
-    /// </summary>
-    private async Task<string?> FindOwnedAlbumIdAsync(Album album, Dictionary<string, string> parameters)
-    {
-        var mapped = new List<string>();
-        foreach (var song in album.Songs.Where(s => s.ExternalProvider != null && s.ExternalId != null))
-        {
-            var mapping = await _localLibraryService.GetMappingForExternalSongAsync(song.ExternalProvider!, song.ExternalId!);
-            if (!string.IsNullOrEmpty(mapping?.LocalSubsonicId))
-            {
-                mapped.Add(mapping.LocalSubsonicId);
-            }
-        }
-
-        var albumKey = StringNormalizer.CreateComparisonKey(album.Title);
-        foreach (var localSongId in mapped.Take(3))
-        {
-            var lookup = new Dictionary<string, string>(parameters) { ["id"] = localSongId, ["f"] = "json" };
-            var result = await _proxyService.RelaySafeAsync("rest/getSong", lookup);
-            if (!result.Success || result.Body == null)
-            {
-                continue;
-            }
-
-            using var doc = JsonDocument.Parse(result.Body);
-            if (doc.RootElement.TryGetProperty("subsonic-response", out var response)
-                && response.TryGetProperty("song", out var song)
-                && song.TryGetProperty("albumId", out var albumId)
-                && song.TryGetProperty("album", out var albumName)
-                && !string.IsNullOrEmpty(albumId.GetString())
-                && (StringNormalizer.CreateComparisonKey(albumName.GetString()) == albumKey
-                    || IsSameAlbumWithEditionSuffix(albumName.GetString(), album.Title)))
-            {
-                return albumId.GetString();
-            }
-        }
-
-        return null;
-    }
-
-    // How long an album page waits for a provider the first time it is asked about; after
-    // that the answer is cached and the page never waits.
-    private static readonly TimeSpan FirstLookupBudget = TimeSpan.FromSeconds(2);
-
-    private async Task<Album?> FindExternalAlbumAsync(string artistName, string albumName, List<string> localTitles)
-    {
-        Task<Album?> Resolve() => ResolveExternalAlbumAsync(artistName, albumName, localTitles);
-
-        if (_albumMergeCache == null)
-        {
-            return await Resolve();
-        }
-
-        var key = $"{StringNormalizer.CreateComparisonKey(artistName)}|{StringNormalizer.CreateComparisonKey(albumName)}|{localTitles.Count}";
-        if (_albumMergeCache.TryGet(key, out var cached, out var stale))
-        {
-            if (stale)
-            {
-                ObserveBackground(_albumMergeCache.ResolveAsync(key, Resolve));
-            }
-            return cached;
-        }
-
-        var lookup = _albumMergeCache.ResolveAsync(key, Resolve);
-        ObserveBackground(lookup);
-        var first = await Task.WhenAny(lookup, Task.Delay(FirstLookupBudget));
-        return first == lookup && lookup.IsCompletedSuccessfully ? lookup.Result : null;
-    }
-
-    private void ObserveBackground(Task task) =>
-        task.ContinueWith(
-            t => _logger.LogWarning(t.Exception?.GetBaseException(), "Album merge lookup failed"),
-            TaskContinuationOptions.OnlyOnFaulted);
-
-    /// <summary>
-    /// The provider album this library album is, or null: the same artist, the same title
-    /// (or the title plus an edition suffix) and tracks in common with the library album.
-    /// </summary>
-    private async Task<Album?> ResolveExternalAlbumAsync(string artistName, string albumName, List<string> localTitles)
-    {
-        var externalAlbumsSearch = await _metadataService.SearchAlbumsAsync($"{artistName} {albumName}", 5);
-
-        // Only a candidate credited to the same artist can be merged, otherwise a homonym
-        // such as "Gary Grimes" pours its tracks into an album by "Grimes".
-        var sameArtistCandidates = externalAlbumsSearch
-            .Where(c => IsSameArtistOrCollaboration(c.Artist, artistName))
-            .ToList();
-
-        var albumKey = StringNormalizer.CreateComparisonKey(albumName);
-        var exact = sameArtistCandidates.Where(c => StringNormalizer.CreateComparisonKey(c.Title) == albumKey).ToList();
-        var editions = sameArtistCandidates.Except(exact).Where(c => IsSameAlbumWithEditionSuffix(c.Title, albumName));
-
-        foreach (var candidate in exact.Concat(editions).Take(3))
-        {
-            var album = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
-            if (album != null && ExternalAlbumMatcher.SharesTracks(localTitles, album.Songs))
-            {
-                return album;
-            }
-        }
-
-        return null;
-    }
-
     private static bool HasEditionSuffix(string longer, string shorter)
     {
         if (!ExtendsAtWordBoundary(longer, shorter))
@@ -733,8 +620,7 @@ public partial class SubsonicController : ControllerBase
         }
 
         var suffix = longer[shorter.Length..].TrimStart();
-        return (suffix.StartsWith('(') || suffix.StartsWith('[') || suffix.StartsWith('-') || suffix.StartsWith(':'))
-            && ExternalAlbumMatcher.IsEditionSuffix(suffix);
+        return (suffix.StartsWith('(') || suffix.StartsWith('[') || suffix.StartsWith('-') || suffix.StartsWith(':')) && ExternalAlbumMatcher.IsEditionSuffix(suffix);
     }
 
     private static bool ExtendsAtWordBoundary(string longer, string shorter)
@@ -966,14 +852,8 @@ public partial class SubsonicController : ControllerBase
                 return _responseBuilder.CreateError(format, 70, "Album not found");
             }
 
-            // An album the library holds by now is served as the library's own, so a page
-            // opened while it was remote shows what is owned instead of staying remote.
-            var ownedAlbumId = await FindOwnedAlbumIdAsync(album, parameters);
-            if (ownedAlbumId == null)
-            {
-                return _responseBuilder.CreateAlbumResponse(format, album);
-            }
-
+            // An album the library holds by now is served as the library's own (fork).
+            if (await FindOwnedAlbumIdAsync(album, parameters) is not { } ownedAlbumId) return _responseBuilder.CreateAlbumResponse(format, album);
             parameters["id"] = ownedAlbumId;
         }
 
@@ -1025,31 +905,10 @@ public partial class SubsonicController : ControllerBase
             return File(navidromeResult.Body, navidromeResult.ContentType ?? "application/json");
         }
 
-        var localSongTitles = new HashSet<string>();
-        var localTitles = new List<string>();
-        foreach (var song in localSongs)
-        {
-            if (song is Dictionary<string, object> dict && dict.TryGetValue("title", out var titleObj))
-            {
-                var title = titleObj?.ToString() ?? "";
-                localTitles.Add(title);
-                localSongTitles.Add(StringNormalizer.CreateComparisonKey(title));
-                localSongTitles.Add(StringNormalizer.CreateSongTitleDedupeKey(title));
-            }
-        }
-        foreach (var song in ChildElements(albumXml, "song"))
-        {
-            var title = song.Attribute("title")?.Value;
-            localTitles.Add(title ?? "");
-            localSongTitles.Add(StringNormalizer.CreateComparisonKey(title));
-            localSongTitles.Add(StringNormalizer.CreateSongTitleDedupeKey(title));
-        }
-
-        var externalAlbum = await FindExternalAlbumAsync(artistName, albumName, localTitles);
+        var (externalAlbum, localSongTitles) = await ForkFindExternalAlbumAsync(artistName, albumName, localSongs, albumXml);
 
         var newSongs = externalAlbum?.Songs
-            .Where(s => !localSongTitles.Contains(StringNormalizer.CreateComparisonKey(s.Title))
-                && !localSongTitles.Contains(StringNormalizer.CreateSongTitleDedupeKey(s.Title)))
+            .Where(s => !localSongTitles.Contains(StringNormalizer.CreateComparisonKey(s.Title)) && !localSongTitles.Contains(StringNormalizer.CreateSongTitleDedupeKey(s.Title)))
             .ToList() ?? new List<Song>();
 
         // XML clients get the Navidrome album element back untouched, missing tracks
@@ -1140,52 +999,113 @@ public partial class SubsonicController : ControllerBase
             return NotFound();
         }
 
-        // Local (Subsonic) covers: relay through to upstream Subsonic (Navidrome).
-        var isPlaylist = PlaylistIdHelper.IsExternalPlaylist(id);
-        (bool isExternal, string? provider, string? type, string? externalId) parsedExternalId = default;
-        if (!isPlaylist)
+        if (GetExternalCoverArtService() is { } coverArtService) return await ForkGetCoverArtAsync(coverArtService, id, parameters);
+
+        // Check if this is a playlist cover art request
+        if (PlaylistIdHelper.IsExternalPlaylist(id))
         {
-            parsedExternalId = _localLibraryService.ParseExternalId(id);
-            if (!parsedExternalId.isExternal)
+            try
             {
-                try
-                {
-                    var result = await _proxyService.RelayAsync("rest/getCoverArt", parameters);
-                    return File(result.Body, result.ContentType ?? "image/jpeg");
-                }
-                catch
+                var (provider, externalId) = PlaylistIdHelper.ParsePlaylistId(id);
+                var playlist = await _metadataService.GetPlaylistAsync(provider, externalId);
+                
+                if (playlist == null || string.IsNullOrEmpty(playlist.CoverUrl))
                 {
                     return NotFound();
                 }
+                
+                // Download and return the cover image
+                var imageResponse = await new HttpClient().GetAsync(playlist.CoverUrl);
+                if (!imageResponse.IsSuccessStatusCode)
+                {
+                    return NotFound();
+                }
+                
+                var imageBytes = await imageResponse.Content.ReadAsByteArrayAsync();
+                var contentType = imageResponse.Content.Headers.ContentType?.ToString() ?? "image/jpeg";
+                return File(imageBytes, contentType);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting playlist cover art for {Id}", id);
+                return NotFound();
             }
         }
 
-        // Honour Subsonic `size` parameter so e.g. album-list thumbnails fetch a much
-        // smaller image from the upstream CDN. Qobuz CDN URLs are size-rewritable
-        // (`{id}_600.jpg` -> `{id}_150.jpg`) without needing an extra API call.
-        int? requestedSize = null;
-        if (parameters.TryGetValue("size", out var sizeStr) && int.TryParse(sizeStr, out var s) && s > 0)
+        var (isExternal, coverProvider, type, coverExternalId) = _localLibraryService.ParseExternalId(id);
+
+        if (!isExternal)
         {
-            requestedSize = s;
+            try
+            {
+                var result = await _proxyService.RelayAsync("rest/getCoverArt", parameters);
+                var contentType = result.ContentType ?? "image/jpeg";
+                return File(result.Body, contentType);
+            }
+            catch
+            {
+                return NotFound();
+            }
         }
 
-        var externalCoverArtService = GetExternalCoverArtService();
-        if (externalCoverArtService == null)
+        string? coverUrl = null;
+
+        // Use type to determine which API to call first
+        switch (type)
         {
-            return NotFound();
+            case "artist":
+                var artist = await _metadataService.GetArtistAsync(coverProvider!, coverExternalId!);
+                if (artist?.ImageUrl != null)
+                {
+                    coverUrl = artist.ImageUrl;
+                }
+                break;
+                
+            case "album":
+                var album = await _metadataService.GetAlbumAsync(coverProvider!, coverExternalId!);
+                if (album?.CoverArtUrl != null)
+                {
+                    coverUrl = album.CoverArtUrlLarge ?? album.CoverArtUrl;
+                }
+                break;
+                
+            case "song":
+            default:
+                if (coverUrl == null)
+                {
+                    var song = await _metadataService.GetSongAsync(coverProvider!, coverExternalId!);
+                    if (song?.CoverArtUrl != null)
+                    {
+                        coverUrl = song.CoverArtUrlLarge ?? song.CoverArtUrl;
+                    }
+                    else
+                    {
+                        var albumFallback = await _metadataService.GetAlbumAsync(coverProvider!, coverExternalId!);
+                        if (albumFallback?.CoverArtUrl != null)
+                        {
+                            coverUrl = albumFallback.CoverArtUrlLarge ?? albumFallback.CoverArtUrl;
+                        }
+                    }
+                }
+                break;
+        }
+        
+        if (coverUrl != null)
+        {
+            using var httpClient = new HttpClient();
+            using var req = new HttpRequestMessage(HttpMethod.Get, coverUrl);
+
+            var response = await httpClient.SendAsync(req);
+            if (response.IsSuccessStatusCode)
+            {
+                var imageBytes = await response.Content.ReadAsByteArrayAsync();
+                var contentType = response.Content.Headers.ContentType?.ToString() ?? "image/jpeg";
+                return File(imageBytes, contentType);
+            }
+            _logger.LogWarning("Cover art fetch failed for {Url}: HTTP {Status}", coverUrl, (int)response.StatusCode);
         }
 
-        var payload = await externalCoverArtService.ResolveAsync(
-            id,
-            parsedExternalId,
-            requestedSize,
-            HttpContext.RequestAborted);
-        if (payload == null)
-        {
-            return NotFound();
-        }
-
-        return File(payload.Bytes, payload.ContentType);
+        return NotFound();
     }
 
     #region Helper Methods
