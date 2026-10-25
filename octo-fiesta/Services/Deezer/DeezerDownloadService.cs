@@ -208,11 +208,7 @@ public class DeezerDownloadService : BaseDownloadService
         var queueResult = await QueueRequestAsync<(TrackDownloadInfo? Info, string? RetryAltId, string? RetryArl)>(async () =>
         {
             // Get track info
-            var trackResponse = await _httpClient.GetAsync($"{DeezerApiBase}/track/{trackId}", cancellationToken);
-            trackResponse.EnsureSuccessStatusCode();
-            
-            var trackJson = await trackResponse.Content.ReadAsStringAsync(cancellationToken);
-            var trackDoc = JsonDocument.Parse(trackJson);
+            var trackDoc = await GetPublicTrackAsync(trackId, cancellationToken);
             
             // Track ID used for decryption (may change if using alternative)
             var decryptionTrackId = trackId;
@@ -241,11 +237,7 @@ public class DeezerDownloadService : BaseDownloadService
                     decryptionTrackId = alternativeTrackId;
                     
                     // Get the alternative track info
-                    var altResponse = await _httpClient.GetAsync($"{DeezerApiBase}/track/{alternativeTrackId}", cancellationToken);
-                    altResponse.EnsureSuccessStatusCode();
-                    
-                    var altJson = await altResponse.Content.ReadAsStringAsync(cancellationToken);
-                    trackDoc = JsonDocument.Parse(altJson);
+                    trackDoc = await GetPublicTrackAsync(alternativeTrackId, cancellationToken);
                 }
                 else
                 {
@@ -411,6 +403,25 @@ public class DeezerDownloadService : BaseDownloadService
         }
 
         throw new InvalidOperationException("GetTrackDownloadInfoInternalAsync: lambda returned no info and no retry instruction");
+    }
+
+    /// <summary>
+    /// Gets a track from the public API. Deezer reports errors in an HTTP 200 body, so they
+    /// must be checked before reading the track.
+    /// </summary>
+    private async Task<JsonDocument> GetPublicTrackAsync(string trackId, CancellationToken cancellationToken)
+    {
+        var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, $"{DeezerApiBase}/track/{trackId}", cancellationToken)
+            ?? throw new Exception($"Deezer API unavailable or throttled for track {trackId}");
+
+        var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.TryGetProperty("error", out var error))
+        {
+            var message = error.TryGetProperty("message", out var messageEl) ? messageEl.GetString() : error.ToString();
+            throw new Exception($"Deezer API error for track {trackId}: {message}");
+        }
+
+        return doc;
     }
 
     #endregion
@@ -605,14 +616,14 @@ public class DeezerDownloadService : BaseDownloadService
     {
         try
         {
-            var searchResponse = await _httpClient.GetAsync(
-                $"{DeezerApiBase}/track/isrc:{isrc}", 
+            var searchJson = await DeezerPublicApi.GetJsonWithRetryAsync(
+                _httpClient,
+                $"{DeezerApiBase}/track/isrc:{isrc}",
                 cancellationToken);
-            
-            if (!searchResponse.IsSuccessStatusCode)
+
+            if (searchJson == null)
                 return null;
-            
-            var searchJson = await searchResponse.Content.ReadAsStringAsync(cancellationToken);
+
             var searchDoc = JsonDocument.Parse(searchJson);
             
             // Check if we got a valid track (not an error)
@@ -695,10 +706,10 @@ public class DeezerDownloadService : BaseDownloadService
             var normalizedTitle = NormalizeTitle(title);
             
             var searchQuery = Uri.EscapeDataString($"{normalizedTitle} {artist}");
-            var searchResponse = await _httpClient.GetAsync($"{DeezerApiBase}/search/track?q={searchQuery}&limit=10", cancellationToken);
-            searchResponse.EnsureSuccessStatusCode();
-            
-            var searchJson = await searchResponse.Content.ReadAsStringAsync(cancellationToken);
+            var searchJson = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, $"{DeezerApiBase}/search/track?q={searchQuery}&limit=10", cancellationToken);
+            if (searchJson == null)
+                return null;
+
             var searchDoc = JsonDocument.Parse(searchJson);
             
             if (!searchDoc.RootElement.TryGetProperty("data", out var data))

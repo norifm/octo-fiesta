@@ -6,39 +6,45 @@ using Org.BouncyCastle.Crypto.Parameters;
 
 namespace octo_fiesta.Services.Deezer;
 
-public sealed class DeezerDecryptedStream(Stream source, string trackId) : Stream
+public sealed class DeezerDecryptedStream : Stream
 {
-        
+    private const int ChunkSize = 2048;
+
     // Deezer's standard Blowfish CBC encryption key for track decryption
     // This is a well-known constant used by the Deezer API, not a user-specific secret
     private const string BfSecret = "g4el58wc0zvf9na1";
-    private static byte[] Iv { get => [0, 1, 2, 3, 4, 5, 6, 7]; }
-    private readonly Stream _source = source;
-    private readonly byte[] _bfKey = GetBlowfishKey(trackId);
-    private readonly byte[] _readBuffer = new byte[2048];
-    private byte[] _currentChunk = [];
+    private static readonly byte[] Iv = [0, 1, 2, 3, 4, 5, 6, 7];
+    private readonly Stream _source;
+    private readonly CbcBlockCipher _cipher;
+    private readonly byte[] _currentChunk = new byte[ChunkSize];
+    private int _chunkLength = 0;
     private int _chunkOffset = 0;
     private int _chunkIndex = 0;
+
+    public DeezerDecryptedStream(Stream source, string trackId)
+    {
+        _source = source;
+        _cipher = new CbcBlockCipher(new BlowfishEngine());
+        _cipher.Init(false, new ParametersWithIV(new KeyParameter(GetBlowfishKey(trackId)), Iv));
+    }
 
     public override async ValueTask<int> ReadAsync(Memory<byte> destination, CancellationToken cancellationToken = default)
     {
         // read and optionally decrypt new chunk from input stream
-        if (_chunkOffset >= _currentChunk.Length)
+        if (_chunkOffset >= _chunkLength)
         {
-            var bytesRead = await _source.ReadAtLeastAsync(
-                _readBuffer,
-                _readBuffer.Length,
+            _chunkLength = await _source.ReadAtLeastAsync(
+                _currentChunk,
+                ChunkSize,
                 throwOnEndOfStream: false,
                 cancellationToken);
-            
-            if (bytesRead == 0) return 0;
 
-            _currentChunk = _readBuffer.AsSpan(0, bytesRead).ToArray();
+            if (_chunkLength == 0) return 0;
 
             // Every 3rd chunk (index % 3 == 0) is encrypted
-            if (_chunkIndex % 3 == 0 && bytesRead == 2048)
+            if (_chunkIndex % 3 == 0 && _chunkLength == ChunkSize)
             {
-                _currentChunk = DecryptBlowfishCbc(_currentChunk);
+                DecryptCurrentChunk();
             }
 
             _chunkOffset = 0;
@@ -46,7 +52,7 @@ public sealed class DeezerDecryptedStream(Stream source, string trackId) : Strea
         }
 
         // copy (part of) current chunk into destination buffer
-        int bytesToCopy = Math.Min(destination.Length, _currentChunk.Length - _chunkOffset);
+        int bytesToCopy = Math.Min(destination.Length, _chunkLength - _chunkOffset);
         _currentChunk.AsSpan(_chunkOffset, bytesToCopy).CopyTo(destination.Span);
 
         _chunkOffset += bytesToCopy;
@@ -92,21 +98,15 @@ public sealed class DeezerDecryptedStream(Stream source, string trackId) : Strea
         return bfKey;
     }
 
-    private byte[] DecryptBlowfishCbc(byte[] data)
+    // Decrypts in place. Each encrypted chunk restarts the CBC chain from the IV.
+    private void DecryptCurrentChunk()
     {
-        // Use BouncyCastle for native Blowfish CBC decryption
-        var engine = new BlowfishEngine();
-        var cipher = new CbcBlockCipher(engine);
-        cipher.Init(false, new ParametersWithIV(new KeyParameter(_bfKey), Iv));
-        
-        var output = new byte[data.Length];
-        var blockSize = cipher.GetBlockSize(); // 8 bytes for Blowfish
-        
-        for (int offset = 0; offset < data.Length; offset += blockSize)
+        _cipher.Reset();
+        var blockSize = _cipher.GetBlockSize(); // 8 bytes for Blowfish
+
+        for (int offset = 0; offset < ChunkSize; offset += blockSize)
         {
-            cipher.ProcessBlock(data, offset, output, offset);
+            _cipher.ProcessBlock(_currentChunk, offset, _currentChunk, offset);
         }
-        
-        return output;
     }
 }

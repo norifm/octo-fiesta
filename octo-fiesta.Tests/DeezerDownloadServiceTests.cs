@@ -294,4 +294,99 @@ public class DeezerDownloadServiceTests : IDisposable
         var ex = await Assert.ThrowsAnyAsync<Exception>(() => downloadTask);
         Assert.Contains("No media sources", ex.Message);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DownloadSongAsync_WritesDecryptedAudio(bool useAlternativeTrack)
+    {
+        var plain = DeezerDecryptedStreamTests.RandomAudio(5_000_000);
+        SetupDownload(plain, useAlternativeTrack);
+
+        var path = await CreateService(arl: "test-arl").DownloadSongAsync("deezer", "123");
+
+        Assert.Equal(".flac", Path.GetExtension(path));
+        Assert.Equal(plain, await File.ReadAllBytesAsync(path));
+    }
+
+    [Fact]
+    public async Task DownloadSongAsync_WhenApiQuotaIsExceeded_RetriesTheTrackLookup()
+    {
+        var plain = DeezerDecryptedStreamTests.RandomAudio(100_000);
+        SetupDownload(plain, trackErrors: "{\"error\":{\"type\":\"Exception\",\"message\":\"Quota limit exceeded\",\"code\":4}}");
+
+        var path = await CreateService(arl: "test-arl").DownloadSongAsync("deezer", "123");
+
+        Assert.Equal(plain, await File.ReadAllBytesAsync(path));
+    }
+
+    [Fact]
+    public async Task DownloadSongAsync_WhenApiReturnsError_ReportsIt()
+    {
+        SetupDownload(DeezerDecryptedStreamTests.RandomAudio(100_000),
+            trackErrors: "{\"error\":{\"type\":\"DataException\",\"message\":\"no data\",\"code\":800}}");
+
+        var ex = await Assert.ThrowsAsync<Exception>(() => CreateService(arl: "test-arl").DownloadSongAsync("deezer", "123"));
+
+        Assert.Equal("Deezer API error for track 123: no data", ex.Message);
+    }
+
+    /// <summary>
+    /// Mocks every Deezer call of a download of track 123. The media is encrypted with the id of
+    /// the track it belongs to, so using the alternative track 456 needs its own key.
+    /// <paramref name="trackErrors"/> are served by the public API before the track itself.
+    /// </summary>
+    private void SetupDownload(byte[] plain, bool useAlternativeTrack = false, params string[] trackErrors)
+    {
+        var encrypted = DeezerDecryptedStreamTests.Encrypt(plain, useAlternativeTrack ? "456" : "123");
+        var pendingErrors = new Queue<string>(trackErrors);
+        var mediaRequests = 0;
+
+        _httpMessageHandlerMock.Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Returns<HttpRequestMessage, CancellationToken>((req, _) =>
+            {
+                var url = req.RequestUri!.ToString();
+                HttpContent content;
+
+                if (url.Contains("deezer.getUserData"))
+                {
+                    content = new StringContent("{\"results\":{\"checkForm\":\"form\",\"USER\":{\"OPTIONS\":{\"license_token\":\"lic\"}}}}");
+                }
+                else if (url.EndsWith("/track/123") || url.EndsWith("/track/456"))
+                {
+                    content = new StringContent(pendingErrors.Count > 0
+                        ? pendingErrors.Dequeue()
+                        : "{\"title\":\"S\",\"artist\":{\"name\":\"A\"},\"readable\":true,\"track_token\":\"tok\"}");
+                }
+                else if (url.Contains("pageTrack"))
+                {
+                    content = new StringContent("{\"results\":{\"DATA\":{\"FALLBACK\":{\"SNG_ID\":\"456\"},\"TRACK_TOKEN\":\"pt\"}}}");
+                }
+                else if (url.Contains("get_url"))
+                {
+                    var hasMedia = !useAlternativeTrack || mediaRequests++ > 0;
+                    content = new StringContent(hasMedia
+                        ? "{\"data\":[{\"media\":[{\"format\":\"FLAC\",\"sources\":[{\"url\":\"https://cdn.test/media\"}]}]}]}"
+                        : "{\"data\":[{}]}");
+                }
+                else if (url == "https://cdn.test/media")
+                {
+                    content = new StreamContent(new DeezerDecryptedStreamTests.TrickleStream(encrypted));
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Unexpected URL in mock: {url}");
+                }
+
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+            });
+
+        _metadataServiceMock
+            .Setup(s => s.GetSongAsync("deezer", "123"))
+            .ReturnsAsync(new Song { ExternalId = "123", ExternalProvider = "deezer", Title = "T", Artist = "A", Album = "B" });
+        _localLibraryServiceMock
+            .Setup(s => s.GetMappingForExternalSongAsync("deezer", "123"))
+            .ReturnsAsync((LocalSongMapping?)null);
+    }
 }

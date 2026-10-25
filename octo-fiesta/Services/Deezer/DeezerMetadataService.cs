@@ -23,82 +23,12 @@ public class DeezerMetadataService : IMusicMetadataService
         _settings = settings.Value;
     }
 
-    /// <summary>
-    /// GETs a Deezer API url with retry + backoff for transient failures. Deezer throttles
-    /// bursts either with HTTP 429/403 or - counter-intuitively - an HTTP 200 body carrying
-    /// error code 4 ("Quota limit exceeded"). Without a retry a single throttled call silently
-    /// drops a track (surfaces upstream as "Song not found"), which is why hearting a large
-    /// playlist loses a handful of tracks on the first pass. Returns the response body, or null
-    /// if permanently unavailable (e.g. 404 / invalid id) or still throttled after all retries.
-    /// </summary>
-    private async Task<string?> GetJsonWithRetryAsync(string url)
-    {
-        int[] backoffMs = { 500, 1000, 2000 };
-        for (int attempt = 0; ; attempt++)
-        {
-            bool transient = false;
-            try
-            {
-                var response = await _httpClient.GetAsync(url);
-                if (response.IsSuccessStatusCode)
-                {
-                    var json = await response.Content.ReadAsStringAsync();
-                    if (!IsQuotaError(json))
-                    {
-                        return json;
-                    }
-                    transient = true; // HTTP 200 + Deezer quota error -> retry
-                }
-                else
-                {
-                    var status = (int)response.StatusCode;
-                    if (status != 429 && status != 403 && status < 500)
-                    {
-                        return null; // permanent (e.g. 404) -> don't retry
-                    }
-                    transient = true;
-                }
-            }
-            catch
-            {
-                transient = true; // network error / timeout -> retry
-            }
-
-            if (transient && attempt < backoffMs.Length)
-            {
-                await Task.Delay(backoffMs[attempt]);
-                continue;
-            }
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// True if the body is a Deezer "Quota limit exceeded" throttling response (error code 4),
-    /// which Deezer returns with an HTTP 200 status. Other errors (e.g. "no data") are permanent.
-    /// </summary>
-    private static bool IsQuotaError(string json)
-    {
-        try
-        {
-            var root = JsonDocument.Parse(json).RootElement;
-            return root.TryGetProperty("error", out var error)
-                && error.TryGetProperty("code", out var code)
-                && code.ValueKind == JsonValueKind.Number
-                && code.GetInt32() == 4;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     public async Task<List<Song>> SearchSongsAsync(string query, int limit = 20)
     {
         try
         {
             var url = $"{BaseUrl}/search/track?q={Uri.EscapeDataString(query)}&limit={limit}";
-            var json = await GetJsonWithRetryAsync(url);
+            var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
             if (json == null) return new List<Song>();
             var result = JsonDocument.Parse(json);
             
@@ -128,7 +58,7 @@ public class DeezerMetadataService : IMusicMetadataService
         try
         {
             var url = $"{BaseUrl}/search/album?q={Uri.EscapeDataString(query)}&limit={limit}";
-            var json = await GetJsonWithRetryAsync(url);
+            var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
             if (json == null) return new List<Album>();
             var result = JsonDocument.Parse(json);
             
@@ -154,7 +84,7 @@ public class DeezerMetadataService : IMusicMetadataService
         try
         {
             var url = $"{BaseUrl}/search/artist?q={Uri.EscapeDataString(query)}&limit={limit}";
-            var json = await GetJsonWithRetryAsync(url);
+            var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
             if (json == null) return new List<Artist>();
             var result = JsonDocument.Parse(json);
             
@@ -216,7 +146,7 @@ public class DeezerMetadataService : IMusicMetadataService
         if (externalProvider != "deezer") return null;
         
         var url = $"{BaseUrl}/track/{externalId}";
-        var json = await GetJsonWithRetryAsync(url);
+        var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
         if (json == null) return null;
 
         var track = JsonDocument.Parse(json).RootElement;
@@ -234,7 +164,7 @@ public class DeezerMetadataService : IMusicMetadataService
             try
             {
                 var albumUrl = $"{BaseUrl}/album/{albumId}";
-                var albumJson = await GetJsonWithRetryAsync(albumUrl);
+                var albumJson = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, albumUrl);
                 if (albumJson != null)
                 {
                     var albumData = JsonDocument.Parse(albumJson).RootElement;
@@ -288,7 +218,7 @@ public class DeezerMetadataService : IMusicMetadataService
         if (externalProvider != "deezer") return null;
         
         var url = $"{BaseUrl}/album/{externalId}";
-        var json = await GetJsonWithRetryAsync(url);
+        var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
         if (json == null) return null;
 
         var albumElement = JsonDocument.Parse(json).RootElement;
@@ -309,7 +239,7 @@ public class DeezerMetadataService : IMusicMetadataService
 
                 while (!string.IsNullOrWhiteSpace(nextPageUrl))
                 {
-                    var tracklistJson = await GetJsonWithRetryAsync(nextPageUrl);
+                    var tracklistJson = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, nextPageUrl);
                     if (tracklistJson == null) break;
 
                     var tracklistElement = JsonDocument.Parse(tracklistJson).RootElement;
@@ -386,7 +316,7 @@ public class DeezerMetadataService : IMusicMetadataService
         if (externalProvider != "deezer") return null;
         
         var url = $"{BaseUrl}/artist/{externalId}";
-        var json = await GetJsonWithRetryAsync(url);
+        var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
         if (json == null) return null;
 
         var artist = JsonDocument.Parse(json).RootElement;
@@ -401,7 +331,7 @@ public class DeezerMetadataService : IMusicMetadataService
         if (externalProvider != "deezer") return new List<Album>();
         
         var url = $"{BaseUrl}/artist/{externalId}/albums";
-        var json = await GetJsonWithRetryAsync(url);
+        var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
         if (json == null) return new List<Album>();
 
         var result = JsonDocument.Parse(json);
@@ -688,7 +618,7 @@ public class DeezerMetadataService : IMusicMetadataService
         try
         {
             var url = $"{BaseUrl}/search/playlist?q={Uri.EscapeDataString(query)}&limit={limit}";
-            var json = await GetJsonWithRetryAsync(url);
+            var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
             if (json == null) return new List<ExternalPlaylist>();
 
             var result = JsonDocument.Parse(json);
@@ -717,7 +647,7 @@ public class DeezerMetadataService : IMusicMetadataService
         try
         {
             var url = $"{BaseUrl}/playlist/{externalId}";
-            var json = await GetJsonWithRetryAsync(url);
+            var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
             if (json == null) return null;
 
             var playlistElement = JsonDocument.Parse(json).RootElement;
@@ -739,7 +669,7 @@ public class DeezerMetadataService : IMusicMetadataService
         try
         {
             var url = $"{BaseUrl}/playlist/{externalId}";
-            var json = await GetJsonWithRetryAsync(url);
+            var json = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, url);
             if (json == null) return new List<Song>();
 
             var playlistElement = JsonDocument.Parse(json).RootElement;
@@ -764,7 +694,7 @@ public class DeezerMetadataService : IMusicMetadataService
 
                     while (!string.IsNullOrWhiteSpace(nextPageUrl))
                     {
-                        var tracklistJson = await GetJsonWithRetryAsync(nextPageUrl);
+                        var tracklistJson = await DeezerPublicApi.GetJsonWithRetryAsync(_httpClient, nextPageUrl);
                         if (tracklistJson == null)
                         {
                             break;
