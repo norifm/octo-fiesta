@@ -684,7 +684,11 @@ public partial class SubsonicResponseBuilder
         if (song != null)
         {
             var (suffix, _, br) = GetSuffixContentTypeAndBitrate(song);
+<<<<<<< HEAD
             container = br > 0 ? suffix : "mp3"; // br == 0: no file yet, the suffix is only the origin label
+=======
+            container = suffix;
+>>>>>>> upstream/dev
             bitRate = br > 0 ? br : 128;
         }
 
@@ -734,7 +738,12 @@ public partial class SubsonicResponseBuilder
             return ("mp3", "audio/mpeg", 128);
         }
 
+<<<<<<< HEAD
         return (GetExternalSuffix(song), "audio/mpeg", 0);
+=======
+        // Default for external providers (Deezer, Qobuz, SquidWTF) without cached file
+        return ("mp3", "audio/mpeg", 128);
+>>>>>>> upstream/dev
     }
 
     private object ConvertJsonValue(JsonElement value)
