@@ -13,7 +13,6 @@ public partial class SubsonicResponseBuilder
 
     private string GetExternalSuffix(Song song)
     {
-        if (!_showExternalProviderInSuffix) return "Remote";
         var origin = Enum.TryParse<MusicService>(song.ExternalProvider, true, out var service)
             ? service.ToString() : song.ExternalProvider ?? "Remote";
         if (song.ExternalProvider == "gdstudio" && song.ExternalId is { } id && id.IndexOf('~') is > 0 and var tilde)

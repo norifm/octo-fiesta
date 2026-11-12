@@ -684,8 +684,9 @@ public partial class SubsonicResponseBuilder
         if (song != null)
         {
             var (suffix, _, br) = GetSuffixContentTypeAndBitrate(song);
-            container = br > 0 ? suffix : "mp3"; // br == 0: no file yet, the suffix is only the origin label
+            container = suffix;
             bitRate = br > 0 ? br : 128;
+            if (br == 0) container = "mp3"; // fork: no file yet, the suffix is only the origin label
         }
 
         return CreateJsonResponse(new
@@ -734,7 +735,10 @@ public partial class SubsonicResponseBuilder
             return ("mp3", "audio/mpeg", 128);
         }
 
-        return (GetExternalSuffix(song), "audio/mpeg", 0);
+        if (_showExternalProviderInSuffix) return (GetExternalSuffix(song), "audio/mpeg", 0); // fork
+
+        // Default for external providers (Deezer, Qobuz, SquidWTF) without cached file
+        return ("mp3", "audio/mpeg", 128);
     }
 
     private object ConvertJsonValue(JsonElement value)

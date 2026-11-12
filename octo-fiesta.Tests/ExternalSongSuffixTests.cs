@@ -11,8 +11,8 @@ public class ExternalSongSuffixTests
         new octo_fiesta.Models.Settings.SubsonicSettings { ShowExternalProviderInSuffix = true }));
 
     [Fact]
-    public void Default_PreservesTheLegacyRemoteSuffix()
-        => Assert.Equal("Remote", new SubsonicResponseBuilder().ConvertSongToJson(External("deezer", "1"))["suffix"]);
+    public void Default_MatchesUpstreamMp3Suffix()
+        => Assert.Equal("mp3", new SubsonicResponseBuilder().ConvertSongToJson(External("deezer", "1"))["suffix"]);
 
     private static string Suffix(Song song) => (string)Builder().ConvertSongToJson(song)["suffix"];
 
