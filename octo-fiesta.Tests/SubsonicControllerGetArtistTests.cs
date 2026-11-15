@@ -21,7 +21,7 @@ public class SubsonicControllerGetArtistTests
 {
     private const string NavidromeArtistJson =
         "{\"subsonic-response\":{\"status\":\"ok\",\"artist\":{\"id\":\"local-artist-id\",\"name\":\"Genesis\",\"albumCount\":1," +
-        "\"album\":[{\"id\":\"local-album-1\",\"name\":\"We Can't Dance\"}]}}}";
+        "\"album\":[{\"id\":\"local-album-1\",\"name\":\"We Can't Dance\",\"releaseTypes\":[\"single\"],\"isCompilation\":false,\"playCount\":3}]}}}";
 
     private const string NavidromeArtistXml =
         "<subsonic-response status=\"ok\" version=\"1.16.1\" xmlns=\"http://subsonic.org/restapi\">" +
@@ -62,7 +62,7 @@ public class SubsonicControllerGetArtistTests
             .ReturnsAsync((HttpRequestMessage request, CancellationToken _) =>
             {
                 var isSearch = request.RequestUri!.AbsolutePath.Contains("search3");
-                var isXml = navidromeXml && !isSearch;
+                var isXml = navidromeXml && !isSearch && !request.RequestUri.Query.Contains("f=json");
                 var body = isSearch
                     ? navidromeSearchJson ?? EmptyNavidromeSearchJson
                     : isXml ? NavidromeArtistXml : NavidromeArtistJson;
@@ -111,18 +111,23 @@ public class SubsonicControllerGetArtistTests
         => GetMergedAlbums(result).Select(a => a.Name).ToList();
 
     private static List<(string Id, string Name)> GetMergedAlbums(IActionResult result)
+        => GetMergedAlbumElements(result)
+            .Select(a => (
+                a.GetProperty("id").GetString() ?? "",
+                a.GetProperty("name").GetString() ?? ""))
+            .ToList();
+
+    private static List<JsonElement> GetMergedAlbumElements(IActionResult result)
     {
         var jsonResult = Assert.IsType<JsonResult>(result);
         var json = JsonSerializer.Serialize(jsonResult.Value);
         using var doc = JsonDocument.Parse(json);
-        var albums = doc.RootElement
+        return doc.RootElement
             .GetProperty("subsonic-response")
             .GetProperty("artist")
-            .GetProperty("album");
-        return albums.EnumerateArray()
-            .Select(a => (
-                a.GetProperty("id").GetString() ?? "",
-                a.GetProperty("name").GetString() ?? ""))
+            .GetProperty("album")
+            .EnumerateArray()
+            .Select(a => a.Clone())
             .ToList();
     }
 
@@ -187,6 +192,61 @@ public class SubsonicControllerGetArtistTests
         // The owned copy must win, otherwise playing it would download the album again
         Assert.Equal("local-album-1", albums[0].Id);
         Assert.Equal("ext-deezer-album-22", albums[1].Id);
+    }
+
+    [Fact]
+    public async Task GetArtist_WhenExternalArtistExistsLocally_KeepsOwnedAlbumsAsTheLibrarySentThem()
+    {
+        var metadataServiceMock = new Mock<IMusicMetadataService>();
+        metadataServiceMock
+            .Setup(x => x.GetArtistAsync("deezer", "42"))
+            .ReturnsAsync(new Artist { Id = "ext-deezer-artist-42", Name = "Genesis" });
+        metadataServiceMock
+            .Setup(x => x.GetArtistAlbumsAsync("deezer", "42"))
+            .ReturnsAsync(new List<Album> { new Album { Id = "ext-deezer-album-21", Title = "We Can't Dance", ReleaseType = "single" } });
+
+        var controller = CreateController(
+            metadataServiceMock,
+            "ext-deezer-artist-42",
+            (true, "deezer", "42"),
+            NavidromeSearchArtistJson);
+
+        var result = await controller.GetArtist();
+
+        // A downloaded single stays a single: clients shelve releases by their type
+        var owned = GetMergedAlbumElements(result).Single();
+        Assert.Equal("local-album-1", owned.GetProperty("id").GetString());
+        Assert.Equal(new[] { "single" }, owned.GetProperty("releaseTypes").EnumerateArray().Select(t => t.GetString()));
+        Assert.Equal(3, owned.GetProperty("playCount").GetInt32());
+        Assert.False(owned.GetProperty("isExternal").GetBoolean());
+    }
+
+    [Fact]
+    public async Task GetArtist_WhenExternalArtistExistsLocallyAndClientAsksXml_KeepsOwnedAlbumAttributes()
+    {
+        var metadataServiceMock = new Mock<IMusicMetadataService>();
+        metadataServiceMock
+            .Setup(x => x.GetArtistAsync("deezer", "42"))
+            .ReturnsAsync(new Artist { Id = "ext-deezer-artist-42", Name = "Genesis" });
+        metadataServiceMock
+            .Setup(x => x.GetArtistAlbumsAsync("deezer", "42"))
+            .ReturnsAsync(new List<Album> { new Album { Id = "ext-deezer-album-22", Title = "Invisible Touch" } });
+
+        var controller = CreateController(
+            metadataServiceMock,
+            "ext-deezer-artist-42",
+            (true, "deezer", "42"),
+            NavidromeSearchArtistJson,
+            navidromeXml: true);
+
+        var result = await controller.GetArtist();
+
+        var content = Assert.IsType<ContentResult>(result);
+        var albums = XDocument.Parse(content.Content!).Descendants()
+            .Where(e => e.Name.LocalName == "album").ToList();
+        Assert.Equal(new[] { "local-album-1", "ext-deezer-album-22" }, albums.Select(a => a.Attribute("id")?.Value));
+        Assert.Equal("3", albums[0].Attribute("playCount")?.Value);
+        Assert.Equal("false", albums[0].Attribute("isExternal")?.Value);
     }
 
     [Fact]

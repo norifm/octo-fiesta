@@ -190,6 +190,11 @@ public class DeezerMetadataService : IMusicMetadataService
                         song.Label = label.GetString();
                     }
                     
+                    if (albumData.TryGetProperty("record_type", out var recordType))
+                    {
+                        song.ReleaseType = recordType.GetString();
+                    }
+                    
                     // Cover art XL if not already set
                     if (string.IsNullOrEmpty(song.CoverArtUrlLarge))
                     {

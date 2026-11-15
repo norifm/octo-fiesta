@@ -262,6 +262,26 @@ public class DeezerMetadataServiceTests
     }
 
     [Fact]
+    public async Task GetSongAsync_TakesTheReleaseTypeFromItsAlbum()
+    {
+        // A track's own album object carries no record_type; the download tags the file from this song
+        var track = new
+        {
+            id = 123456,
+            title = "Doomed",
+            artist = new { id = 789, name = "Maphra" },
+            album = new { id = 456, title = "Doomed", type = "album" }
+        };
+        var album = new { id = 456, title = "Doomed", record_type = "single", nb_tracks = 1 };
+
+        SetupSequentialHttpResponses(JsonSerializer.Serialize(track), JsonSerializer.Serialize(album));
+
+        var result = await _service.GetSongAsync("deezer", "123456");
+
+        Assert.Equal("single", result!.ReleaseType);
+    }
+
+    [Fact]
     public async Task GetSongAsync_WithNonDeezerProvider_ReturnsNull()
     {
         // Act

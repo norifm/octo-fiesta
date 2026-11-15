@@ -308,7 +308,8 @@ public partial class SubsonicResponseBuilder
     /// <summary>
     /// Creates a Subsonic response containing an artist with albums.
     /// </summary>
-    public IActionResult CreateArtistResponse(string format, Artist artist, List<Album> albums)
+    /// <param name="ownedAlbums">The library's albums as the backing server sent them (JSON), listed first.</param>
+    public IActionResult CreateArtistResponse(string format, Artist artist, IReadOnlyList<JsonElement> ownedAlbums, List<Album> albums)
     {
         if (format == "json")
         {
@@ -321,9 +322,11 @@ public partial class SubsonicResponseBuilder
                     id = artist.Id,
                     name = artist.Name,
                     coverArt = artist.Id,
-                    albumCount = albums.Count,
+                    albumCount = ownedAlbums.Count + albums.Count,
                     artistImageUrl = artist.ImageUrl,
-                    album = albums.Select(a => ConvertAlbumToJson(a)).ToList()
+                    album = ownedAlbums.Select(a => ConvertSubsonicJsonElement(a, true))
+                        .Concat(albums.Select(a => ConvertAlbumToJson(a)))
+                        .ToList()
                 }
             });
         }
@@ -337,7 +340,8 @@ public partial class SubsonicResponseBuilder
                     new XAttribute("id", artist.Id),
                     new XAttribute("name", artist.Name),
                     new XAttribute("coverArt", artist.Id),
-                    new XAttribute("albumCount", albums.Count),
+                    new XAttribute("albumCount", ownedAlbums.Count + albums.Count),
+                    ownedAlbums.Select(a => ConvertJsonAlbumToXml(a, ns)),
                     albums.Select(a => ConvertAlbumToXml(a, ns))
                 )
             )
@@ -471,6 +475,23 @@ public partial class SubsonicResponseBuilder
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Converts a library album relayed as JSON to an XML album, its scalar fields as attributes.
+    /// </summary>
+    private static XElement ConvertJsonAlbumToXml(JsonElement album, XNamespace ns)
+    {
+        var element = new XElement(ns + "album");
+        foreach (var prop in album.EnumerateObject())
+        {
+            if (prop.Value.ValueKind is JsonValueKind.String or JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False)
+            {
+                element.SetAttributeValue(prop.Name, prop.Value.ValueKind == JsonValueKind.String ? prop.Value.GetString() : prop.Value.GetRawText());
+            }
+        }
+        element.SetAttributeValue("isExternal", "false");
+        return element;
     }
 
     /// <summary>

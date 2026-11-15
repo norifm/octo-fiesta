@@ -404,18 +404,14 @@ public partial class SubsonicController : ControllerBase
             // The library can hold albums the provider does not list, and a client that
             // navigated here from an external track would otherwise never see them.
             var ownedAlbums = await GetLocalArtistAlbumsAsync(artist.Name, parameters);
-            if (ownedAlbums.Count > 0)
-            {
-                var ownedTitles = ownedAlbums
-                    .Select(a => StringNormalizer.CreateComparisonKey(a.Title))
-                    .ToHashSet();
+            var ownedTitles = ownedAlbums
+                .Select(a => StringNormalizer.CreateComparisonKey(a.GetProperty("name").GetString()))
+                .ToHashSet();
+            var providerAlbums = albums
+                .Where(a => !ownedTitles.Contains(StringNormalizer.CreateComparisonKey(a.Title)))
+                .ToList();
 
-                albums = ownedAlbums
-                    .Concat(albums.Where(a => !ownedTitles.Contains(StringNormalizer.CreateComparisonKey(a.Title))))
-                    .ToList();
-            }
-
-            return _responseBuilder.CreateArtistResponse(format, artist, albums);
+            return _responseBuilder.CreateArtistResponse(format, artist, ownedAlbums, providerAlbums);
         }
 
         var navidromeResult = await _proxyService.RelaySafeAsync("rest/getArtist", parameters);
@@ -1141,12 +1137,12 @@ public partial class SubsonicController : ControllerBase
         => int.TryParse(element.Attribute(name)?.Value, out var value) ? value : 0;
 
     /// <summary>
-    /// Returns the albums the library owns for an artist, matched by name. Empty when the
-    /// backing Subsonic server knows no artist under that name.
+    /// Returns the albums the library owns for an artist, matched by name, as the backing
+    /// Subsonic server sent them. Empty when it knows no artist under that name.
     /// </summary>
-    private async Task<List<Album>> GetLocalArtistAlbumsAsync(string artistName, Dictionary<string, string> parameters)
+    private async Task<List<JsonElement>> GetLocalArtistAlbumsAsync(string artistName, Dictionary<string, string> parameters)
     {
-        var albums = new List<Album>();
+        var albums = new List<JsonElement>();
 
         if (string.IsNullOrWhiteSpace(artistName))
         {
@@ -1176,14 +1172,9 @@ public partial class SubsonicController : ControllerBase
                 artistElement.TryGetProperty("album", out var albumArray) &&
                 albumArray.ValueKind == JsonValueKind.Array)
             {
-                foreach (var albumElement in albumArray.EnumerateArray())
-                {
-                    var album = ParseLocalAlbum(albumElement);
-                    if (album != null)
-                    {
-                        albums.Add(album);
-                    }
-                }
+                albums.AddRange(albumArray.EnumerateArray()
+                    .Where(a => !string.IsNullOrEmpty(StringProperty(a, "id")) && !string.IsNullOrEmpty(StringProperty(a, "name")))
+                    .Select(a => a.Clone()));
             }
         }
         catch (JsonException ex)
@@ -1262,28 +1253,8 @@ public partial class SubsonicController : ControllerBase
         }
     }
 
-    private static Album? ParseLocalAlbum(JsonElement element)
-    {
-        var id = element.TryGetProperty("id", out var idElement) ? idElement.GetString() : null;
-        var name = element.TryGetProperty("name", out var nameElement) ? nameElement.GetString() : null;
-
-        if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name))
-        {
-            return null;
-        }
-
-        return new Album
-        {
-            Id = id,
-            Title = name,
-            Artist = element.TryGetProperty("artist", out var artistElement) ? artistElement.GetString() ?? "" : "",
-            ArtistId = element.TryGetProperty("artistId", out var artistIdElement) ? artistIdElement.GetString() : null,
-            Year = element.TryGetProperty("year", out var yearElement) && yearElement.TryGetInt32(out var year) ? year : null,
-            SongCount = element.TryGetProperty("songCount", out var countElement) && countElement.TryGetInt32(out var count) ? count : null,
-            Genre = element.TryGetProperty("genre", out var genreElement) ? genreElement.GetString() : null,
-            IsLocal = true
-        };
-    }
+    private static string? StringProperty(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 
     /// <summary>
     /// Copies the client credentials for a server-to-server relay, dropping the parameters

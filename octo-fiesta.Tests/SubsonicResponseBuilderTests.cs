@@ -256,7 +256,7 @@ public class SubsonicResponseBuilderTests
         };
 
         // Act
-        var result = _builder.CreateArtistResponse("json", artist, albums);
+        var result = _builder.CreateArtistResponse("json", artist, Array.Empty<JsonElement>(), albums);
 
         // Assert
         var jsonResult = Assert.IsType<JsonResult>(result);
@@ -285,7 +285,7 @@ public class SubsonicResponseBuilderTests
         };
 
         // Act
-        var result = _builder.CreateArtistResponse("xml", artist, albums);
+        var result = _builder.CreateArtistResponse("xml", artist, Array.Empty<JsonElement>(), albums);
 
         // Assert
         var contentResult = Assert.IsType<ContentResult>(result);
