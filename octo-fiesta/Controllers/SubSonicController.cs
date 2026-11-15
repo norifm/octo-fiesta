@@ -317,6 +317,49 @@ public partial class SubsonicController : ControllerBase
     }
 
     /// <summary>
+    /// getAlbumInfo/getArtistInfo (and their ID3 variants). External ids have no record on
+    /// the backing Subsonic server, which answers "not found"; clients that fetch info
+    /// alongside the item (e.g. Music Assistant) then treat the album or artist as missing.
+    /// Info is optional metadata, so answer external ids with an empty info element.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/getAlbumInfo")]
+    [Route("rest/getAlbumInfo.view")]
+    public Task<IActionResult> GetAlbumInfo() => GetItemInfo("rest/getAlbumInfo", "albumInfo");
+
+    [HttpGet, HttpPost]
+    [Route("rest/getAlbumInfo2")]
+    [Route("rest/getAlbumInfo2.view")]
+    public Task<IActionResult> GetAlbumInfo2() => GetItemInfo("rest/getAlbumInfo2", "albumInfo");
+
+    [HttpGet, HttpPost]
+    [Route("rest/getArtistInfo")]
+    [Route("rest/getArtistInfo.view")]
+    public Task<IActionResult> GetArtistInfo() => GetItemInfo("rest/getArtistInfo", "artistInfo");
+
+    [HttpGet, HttpPost]
+    [Route("rest/getArtistInfo2")]
+    [Route("rest/getArtistInfo2.view")]
+    public Task<IActionResult> GetArtistInfo2() => GetItemInfo("rest/getArtistInfo2", "artistInfo2");
+
+    private async Task<IActionResult> GetItemInfo(string endpoint, string elementName)
+    {
+        var parameters = await ExtractAllParameters();
+        var id = parameters.GetValueOrDefault("id", "");
+        var format = parameters.GetValueOrDefault("f", "xml");
+
+        var (isExternal, _, _, _) = _localLibraryService.ParseExternalId(id);
+        if (!isExternal)
+        {
+            var result = await _proxyService.RelayAsync(endpoint, parameters);
+            var contentType = result.ContentType ?? $"application/{format}";
+            return File(result.Body, contentType);
+        }
+
+        return _responseBuilder.CreateEmptyElementResponse(format, elementName);
+    }
+
+    /// <summary>
     /// OpenSubsonic getLyricsBySongId. Local tracks are answered by the backing Subsonic
     /// server (which reads embedded and external .lrc lyrics). For an external, not-yet-local
     /// track we fetch synced lyrics live (LRCLIB) so the client shows them on the first listen,
@@ -1737,6 +1780,13 @@ public partial class SubsonicController : ControllerBase
         return null;
     }
 
+    /// <summary>
+    /// Extension added to getOpenSubsonicExtensions so clients can tell they talk to the
+    /// server through octo-fiesta, where external (ext-) items may trigger provider downloads.
+    /// </summary>
+    public const string ProxyExtensionName = "octoFiesta";
+    public const int ProxyExtensionVersion = 1;
+
     // Generic endpoint to handle all subsonic API calls
     [HttpGet, HttpPost]
     [Route("{**endpoint}")]
@@ -1784,15 +1834,28 @@ public partial class SubsonicController : ControllerBase
                     }
 
                     var response = JsonNode.Parse(body[jsonStart..jsonEnd])!;
-                    if (response["subsonic-response"]?["openSubsonicExtensions"] is JsonArray extensions)
+                    if (response["subsonic-response"] is JsonObject subsonicResponse)
                     {
+                        if (subsonicResponse["openSubsonicExtensions"] is not JsonArray extensions)
+                        {
+                            extensions = new JsonArray();
+                            subsonicResponse["openSubsonicExtensions"] = extensions;
+                        }
+
                         for (var i = extensions.Count - 1; i >= 0; i--)
                         {
-                            if (extensions[i]?["name"]?.GetValue<string>() == "playbackReport")
+                            var name = extensions[i]?["name"]?.GetValue<string>();
+                            if (name == "playbackReport" || name == ProxyExtensionName)
                             {
                                 extensions.RemoveAt(i);
                             }
                         }
+
+                        extensions.Add(new JsonObject
+                        {
+                            ["name"] = ProxyExtensionName,
+                            ["versions"] = new JsonArray(ProxyExtensionVersion)
+                        });
                     }
                     var filteredBody = body[..jsonStart] + response.ToJsonString() + body[jsonEnd..];
                     return File(Encoding.UTF8.GetBytes(filteredBody), contentType);
@@ -1800,7 +1863,14 @@ public partial class SubsonicController : ControllerBase
 
                 var xml = XDocument.Parse(Encoding.UTF8.GetString(result.Body));
                 xml.Root?.Elements().Where(e => e.Name.LocalName == "openSubsonicExtensions" &&
-                    (string?)e.Attribute("name") == "playbackReport").Remove();
+                    (string?)e.Attribute("name") is "playbackReport" or ProxyExtensionName).Remove();
+                if (xml.Root != null)
+                {
+                    var ns = xml.Root.Name.Namespace;
+                    xml.Root.Add(new XElement(ns + "openSubsonicExtensions",
+                        new XAttribute("name", ProxyExtensionName),
+                        new XElement(ns + "versions", ProxyExtensionVersion)));
+                }
                 return File(Encoding.UTF8.GetBytes(xml.ToString(SaveOptions.DisableFormatting)), contentType);
             }
 

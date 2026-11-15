@@ -58,7 +58,7 @@ public partial class LocalLibraryService : ILocalLibraryService
         // Shared path, so a per-provider override does not split the mapping registry in two.
         _downloadDirectory = DownloadPathResolver.GetSharedPath(configuration);
         _libraryRoots = DownloadPathResolver.GetAllRoots(configuration);
-        _mappingFilePath = Path.Combine(_downloadDirectory, ".mappings.json");
+        _mappingFilePath = DownloadPathResolver.GetMappingsPath(configuration);
         _httpClient = httpClientFactory.CreateClient();
         _metadataService = metadataService;
         _subsonicSettings = subsonicSettings.Value;
@@ -75,6 +75,12 @@ public partial class LocalLibraryService : ILocalLibraryService
         if (!Directory.Exists(_downloadDirectory))
         {
             Directory.CreateDirectory(_downloadDirectory);
+        }
+
+        var mappingsDirectory = Path.GetDirectoryName(_mappingFilePath);
+        if (!string.IsNullOrWhiteSpace(mappingsDirectory) && !Directory.Exists(mappingsDirectory))
+        {
+            Directory.CreateDirectory(mappingsDirectory);
         }
     }
 
@@ -147,7 +153,7 @@ public partial class LocalLibraryService : ILocalLibraryService
                     return matches;
                 }
 
-                external = new TrackInfo(externalSong.Title, externalSong.Artist, externalSong.Duration, externalSong.Isrc);
+                external = new TrackInfo(externalSong.Title, externalSong.Artist, externalSong.Duration, externalSong.Isrc, IsExplicit: externalSong.IsExplicit);
             }
 
             // Edition labels ("Album Version", "Explicit") and featured artists are left out of
@@ -503,7 +509,14 @@ public partial class LocalLibraryService : ILocalLibraryService
             }
         }
 
-        return new TrackInfo(GetString("title"), GetString("artist"), duration, ArtistNames: artists, IsrcList: isrcs);
+        bool? isExplicit = GetString("explicitStatus") switch
+        {
+            "explicit" => true,
+            "clean" => false,
+            _ => null
+        };
+
+        return new TrackInfo(GetString("title"), GetString("artist"), duration, ArtistNames: artists, IsrcList: isrcs, IsExplicit: isExplicit);
     }
 
     private static IEnumerable<JsonElement> EnumerateSongs(JsonElement songNode)

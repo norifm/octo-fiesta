@@ -37,6 +37,9 @@ services:
       - ASPNETCORE_URLS=http://+:${INTERNAL_PORT:-8080}
       # Download path inside container
       - Library__DownloadPath=/app/downloads
+      # Mappings file path inside container (default: inside the download path)
+      # Point it at the /config volume when downloads live on a remote mount
+      - Library__MappingsPath=${MAPPINGS_PATH:-}
       
       # ===== SUBSONIC SETTINGS =====
       # Navidrome/Subsonic server URL
@@ -59,6 +62,8 @@ services:
       - Subsonic__ExplicitFilter=${EXPLICIT_FILTER:-All}
       # Download mode: Track (only requested track), Album (full album when playing a track)
       - Subsonic__DownloadMode=${DOWNLOAD_MODE:-Track}
+      # Maximum number of downloads running at the same time (default: 1, max: 5)
+      - Subsonic__MaxConcurrentDownloads=${MAX_CONCURRENT_DOWNLOADS:-1}
       # Auto upgrade quality: re-download tracks when higher quality is available (default: false)
       - Subsonic__AutoUpgradeQuality=${AUTO_UPGRADE_QUALITY:-false}
       # Disable triggering a library scan after a download completes (default: false)
