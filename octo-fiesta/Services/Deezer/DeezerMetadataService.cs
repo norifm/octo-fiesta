@@ -1,3 +1,4 @@
+using octo_fiesta.Services.Common;
 using octo_fiesta.Models.Domain;
 using octo_fiesta.Models.Settings;
 using octo_fiesta.Models.Download;
@@ -218,6 +219,18 @@ public class DeezerMetadataService : IMusicMetadataService
         return song;
     }
 
+    public async Task<Album?> GetAlbumByBarcodeAsync(string barcode)
+    {
+        // Deezer resolves "upc:<code>" to the album carrying that barcode
+        foreach (var variant in BarcodeHelper.Variants(barcode))
+        {
+            var album = await GetAlbumAsync("deezer", $"upc:{variant}");
+            if (album != null) return album;
+        }
+
+        return null;
+    }
+
     public async Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
     {
         if (externalProvider != "deezer") return null;
@@ -396,9 +409,8 @@ public class DeezerMetadataService : IMusicMetadataService
                 : null,
             Track = trackNumber,
             DiscNumber = discNumber,
-            CoverArtUrl = track.TryGetProperty("album", out var albumForCover) &&
-                          albumForCover.TryGetProperty("cover_medium", out var cover)
-                ? cover.GetString()
+            CoverArtUrl = track.TryGetProperty("album", out var albumForCover)
+                ? GetDisplayCover(albumForCover)
                 : null,
             CoverArtUrlLarge = track.TryGetProperty("album", out var albumForCoverXL) && 
                             albumForCoverXL.TryGetProperty("cover_xl", out var coverxl)
@@ -494,14 +506,12 @@ public class DeezerMetadataService : IMusicMetadataService
                 : null;
         }
         
-        // Cover art URLs (different sizes)
+        // Cover art URLs: display size (500 px) and the largest for embedding
         string? coverMedium = null;
         string? coverLarge = null;
         if (track.TryGetProperty("album", out var albumForCover))
         {
-            coverMedium = albumForCover.TryGetProperty("cover_medium", out var cm) 
-                ? cm.GetString() 
-                : null;
+            coverMedium = GetDisplayCover(albumForCover);
             coverLarge = albumForCover.TryGetProperty("cover_xl", out var cxl) 
                 ? cxl.GetString() 
                 : (albumForCover.TryGetProperty("cover_big", out var cb) ? cb.GetString() : null);
@@ -574,9 +584,7 @@ public class DeezerMetadataService : IMusicMetadataService
             SongCount = album.TryGetProperty("nb_tracks", out var nbTracks) 
                 ? nbTracks.GetInt32() 
                 : null,
-            CoverArtUrl = album.TryGetProperty("cover_medium", out var cover)
-                ? cover.GetString()
-                : null,
+            CoverArtUrl = GetDisplayCover(album),
             CoverArtUrlLarge = album.TryGetProperty("cover_xl", out var coverXl)
                 ? coverXl.GetString()
                 : (album.TryGetProperty("cover_big", out var coverBig)
@@ -841,5 +849,20 @@ public class DeezerMetadataService : IMusicMetadataService
             
             _ => true
         };
+    }
+
+    /// <summary>
+    /// The album cover at display size (500 px), the 250 px one when that is all there is.
+    /// </summary>
+    private static string? GetDisplayCover(JsonElement album)
+    {
+        foreach (var name in new[] { "cover_big", "cover_medium" })
+        {
+            if (album.TryGetProperty(name, out var cover) && cover.ValueKind == JsonValueKind.String)
+            {
+                return cover.GetString();
+            }
+        }
+        return null;
     }
 }
