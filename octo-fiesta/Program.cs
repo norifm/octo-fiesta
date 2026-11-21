@@ -69,6 +69,7 @@ builder.Services.AddSingleton<ILocalLibraryService, LocalLibraryService>();
 builder.Services.AddSingleton<SubsonicRequestParser>();
 builder.Services.AddSingleton<SubsonicResponseBuilder>();
 builder.Services.AddSingleton<SubsonicModelMapper>();
+builder.Services.AddSingleton<ExternalCoverArtService>();
 builder.Services.AddScoped<SubsonicProxyService>();
 
 // Lyrics lookup (LRCLIB). Always registered; gated at runtime by Lyrics:Enabled.
@@ -246,7 +247,8 @@ foreach (var url in app.Urls)
 
 Console.WriteLine();
 
-// Wait for shutdown
+// Wait for shutdown, then dispose the services as app.Run() would
 app.WaitForShutdown();
+await app.DisposeAsync();
 
 return 0;
