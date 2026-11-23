@@ -102,6 +102,16 @@ public class TidalMetadataService : IMusicMetadataService
         return track is null ? null : MapTrackToSong(track);
     }
 
+    public async Task<Album?> GetAlbumByBarcodeAsync(string barcode)
+    {
+        // Tidal has no barcode lookup on this API, so search the digits and keep only
+        // an album whose own UPC is the one asked for.
+        var result = await SearchAsync(barcode.TrimStart('0'), "ALBUMS", 25);
+        var match = result?.Albums?.Items?.FirstOrDefault(a => BarcodeHelper.AreEqual(a.Upc, barcode));
+
+        return match is null ? null : await GetAlbumAsync(ProviderName, match.Id.ToString(CultureInfo.InvariantCulture));
+    }
+
     public async Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
     {
         if (externalProvider != ProviderName) return null;
@@ -418,7 +428,7 @@ public class TidalMetadataService : IMusicMetadataService
     /// <summary>
     /// Cover and picture ids are UUIDs whose dashes become path separators on the CDN.
     /// </summary>
-    private static string? BuildCoverUrl(string? coverId, string size = "320x320")
+    private static string? BuildCoverUrl(string? coverId, string size = "640x640")
     {
         if (string.IsNullOrEmpty(coverId)) return null;
         return $"https://resources.tidal.com/images/{coverId.Replace("-", "/")}/{size}.jpg";
