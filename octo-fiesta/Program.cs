@@ -69,6 +69,7 @@ builder.Services.AddSingleton<ILocalLibraryService, LocalLibraryService>();
 builder.Services.AddSingleton<SubsonicRequestParser>();
 builder.Services.AddSingleton<SubsonicResponseBuilder>();
 builder.Services.AddSingleton<SubsonicModelMapper>();
+builder.Services.AddSingleton<ExternalCoverArtService>();
 builder.Services.AddScoped<SubsonicProxyService>();
 
 // Lyrics lookup (LRCLIB). Always registered; gated at runtime by Lyrics:Enabled.
@@ -166,11 +167,16 @@ else
     builder.Services.AddSingleton<IDownloadService, DeezerDownloadService>();
 }
 
+<<<<<<< HEAD
 // Apple Music through alacarte next to the primary provider, when configured
 if (!composedProviders && musicService != MusicService.AppleMusic && AppleMusicRegistration.IsConfigured(builder.Configuration))
 {
     AppleMusicRegistration.AddAppleMusicAlongside(builder.Services, enableExternalPlaylists);
 }
+=======
+// Read by the Deezer services and validator, whichever role Deezer has
+builder.Services.AddSingleton<DeezerAccount>();
+>>>>>>> upstream/dev
 
 // Startup validation - register validators
 builder.Services.AddSingleton<IStartupValidator, SubsonicStartupValidator>();
@@ -246,7 +252,8 @@ foreach (var url in app.Urls)
 
 Console.WriteLine();
 
-// Wait for shutdown
+// Wait for shutdown, then dispose the services as app.Run() would
 app.WaitForShutdown();
+await app.DisposeAsync();
 
 return 0;

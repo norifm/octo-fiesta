@@ -178,6 +178,9 @@ public class TidalItemWrapper
 
 public class TidalTrack
 {
+    [JsonPropertyName("mediaMetadata")]
+    public TidalMediaMetadata? MediaMetadata { get; set; }
+
     [JsonPropertyName("id")]
     public long Id { get; set; }
 
@@ -229,6 +232,9 @@ public class TidalTrack
 
 public class TidalAlbum
 {
+    [JsonPropertyName("upc")]
+    public string? Upc { get; set; }
+
     [JsonPropertyName("id")]
     public long Id { get; set; }
 
@@ -380,3 +386,12 @@ public class TidalManifest
 }
 
 #endregion
+
+/// <summary>
+/// The audio tiers a track is available in, e.g. LOSSLESS, HIRES_LOSSLESS.
+/// </summary>
+public class TidalMediaMetadata
+{
+    [JsonPropertyName("tags")]
+    public List<string>? Tags { get; set; }
+}

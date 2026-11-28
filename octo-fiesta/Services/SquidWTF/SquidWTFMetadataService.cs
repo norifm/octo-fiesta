@@ -3,6 +3,7 @@ using octo_fiesta.Models.Settings;
 using octo_fiesta.Models.Search;
 using octo_fiesta.Models.Subsonic;
 using octo_fiesta.Models.SquidWTF;
+using octo_fiesta.Services.Common;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 
@@ -159,6 +160,21 @@ public class SquidWTFMetadataService : IMusicMetadataService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to get album: {ExternalId}", externalId);
+            return null;
+        }
+    }
+
+    public async Task<Album?> GetAlbumByBarcodeAsync(string barcode)
+    {
+        try
+        {
+            if (IsQobuzSource)
+                return await GetAlbumByBarcodeQobuzAsync(barcode);
+            return await GetAlbumByBarcodeTidalAsync(barcode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get album by barcode: {Barcode}", barcode);
             return null;
         }
     }
@@ -325,6 +341,32 @@ public class SquidWTFMetadataService : IMusicMetadataService
         if (track == null) return null;
         
         return MapQobuzTrackToSong(track);
+    }
+
+    private async Task<Album?> GetAlbumByBarcodeQobuzAsync(string barcode)
+    {
+        // A text search: keep only the album whose own barcode matches
+        var url = $"{QobuzBaseUrl}/api/get-music?q={Uri.EscapeDataString(barcode.TrimStart('0'))}&offset=0";
+        var response = await SendQobuzRequestAsync(url);
+        if (response != null)
+        {
+            var searchResponse = JsonSerializer.Deserialize<QobuzSearchResponse>(response);
+            var match = searchResponse?.Data?.Albums?.Items?
+                .FirstOrDefault(a => a.Id != null && BarcodeHelper.AreEqual(a.Upc, barcode));
+            if (match != null)
+            {
+                return await GetAlbumQobuzAsync(match.Id!);
+            }
+        }
+
+        // Many Qobuz album ids are the barcode itself
+        foreach (var variant in BarcodeHelper.Variants(barcode))
+        {
+            var album = await GetAlbumQobuzAsync(variant);
+            if (album != null) return album;
+        }
+
+        return null;
     }
 
     private async Task<Album?> GetAlbumQobuzAsync(string albumId)
@@ -542,6 +584,18 @@ public class SquidWTFMetadataService : IMusicMetadataService
         if (trackInfoWrapper?.Data == null) return null;
         
         return MapTidalTrackInfoToSong(trackInfoWrapper.Data);
+    }
+
+    private async Task<Album?> GetAlbumByBarcodeTidalAsync(string barcode)
+    {
+        // No barcode lookup here either: search the digits and keep only an album whose UPC matches
+        var response = await SendTidalRequestAsync($"/search/?al={Uri.EscapeDataString(barcode.TrimStart('0'))}");
+        if (response == null) return null;
+
+        var dataResponse = JsonSerializer.Deserialize<TidalNestedSearchResponse>(response);
+        var match = dataResponse?.Data?.Albums?.Items?.FirstOrDefault(a => BarcodeHelper.AreEqual(a.Upc, barcode));
+
+        return match == null ? null : await GetAlbumTidalAsync(match.Id.ToString());
     }
 
     private async Task<Album?> GetAlbumTidalAsync(string albumId)
@@ -790,12 +844,15 @@ public class SquidWTFMetadataService : IMusicMetadataService
             Copyright = track.Copyright ?? track.Album?.Copyright,
             Contributors = contributors,
             TotalTracks = track.Album?.TracksCount,
-            CoverArtUrl = track.Album?.Image?.Thumbnail ?? track.Album?.Image?.Small,
+            CoverArtUrl = track.Album?.Image?.Large ?? track.Album?.Image?.Small ?? track.Album?.Image?.Thumbnail,
             CoverArtUrlLarge = track.Album?.Image?.Large,
             IsLocal = false,
             ExternalProvider = "squidwtf",
             ExternalId = externalId,
-            ExplicitContentLyrics = track.ParentalWarning ? 1 : 0
+            ExplicitContentLyrics = track.ParentalWarning ? 1 : 0,
+            ExpectedFormat = SquidWTFQuality.ExpectedQobuzFormat(_settings.Quality,
+                track.MaximumBitDepth ?? track.Album?.MaximumBitDepth,
+                track.MaximumSamplingRate ?? track.Album?.MaximumSamplingRate)
         };
     }
 
@@ -818,7 +875,7 @@ public class SquidWTFMetadataService : IMusicMetadataService
             ArtistId = album.Artist != null ? $"ext-squidwtf-artist-{album.Artist.Id}" : null,
             Year = year,
             SongCount = album.TracksCount,
-            CoverArtUrl = album.Image?.Small ?? album.Image?.Thumbnail,
+            CoverArtUrl = album.Image?.Large ?? album.Image?.Small ?? album.Image?.Thumbnail,
             CoverArtUrlLarge = album.Image?.Large,
             Genre = album.Genre?.Name,
             ReleaseType = album.ReleaseType,
@@ -896,12 +953,13 @@ public class SquidWTFMetadataService : IMusicMetadataService
             ReleaseType = track.Album?.Type,
             Copyright = track.Copyright,
             TotalTracks = track.Album?.NumberOfTracks,
-            CoverArtUrl = GetTidalCoverUrl(track.Album?.Cover, "320x320"),
+            CoverArtUrl = GetTidalCoverUrl(track.Album?.Cover, "640x640"),
             CoverArtUrlLarge = GetTidalCoverUrl(track.Album?.Cover, "1280x1280"),
             IsLocal = false,
             ExternalProvider = "squidwtf",
             ExternalId = externalId,
-            ExplicitContentLyrics = track.Explicit ? 1 : 0
+            ExplicitContentLyrics = track.Explicit ? 1 : 0,
+            ExpectedFormat = SquidWTFQuality.ExpectedTidalFormat(_settings.Quality, track.AudioQuality, track.MediaMetadata?.Tags)
         };
     }
 
@@ -948,12 +1006,13 @@ public class SquidWTFMetadataService : IMusicMetadataService
             Bpm = track.Bpm,
             Copyright = track.Copyright,
             TotalTracks = track.Album?.NumberOfTracks,
-            CoverArtUrl = GetTidalCoverUrl(track.Album?.Cover, "320x320"),
+            CoverArtUrl = GetTidalCoverUrl(track.Album?.Cover, "640x640"),
             CoverArtUrlLarge = GetTidalCoverUrl(track.Album?.Cover, "1280x1280"),
             IsLocal = false,
             ExternalProvider = "squidwtf",
             ExternalId = externalId,
-            ExplicitContentLyrics = track.Explicit ? 1 : 0
+            ExplicitContentLyrics = track.Explicit ? 1 : 0,
+            ExpectedFormat = SquidWTFQuality.ExpectedTidalFormat(_settings.Quality, track.AudioQuality, track.MediaMetadata?.Tags)
         };
     }
 
@@ -982,7 +1041,7 @@ public class SquidWTFMetadataService : IMusicMetadataService
             Year = year,
             SongCount = album.NumberOfTracks,
             ReleaseType = album.Type,
-            CoverArtUrl = GetTidalCoverUrl(album.Cover, "320x320"),
+            CoverArtUrl = GetTidalCoverUrl(album.Cover, "640x640"),
             CoverArtUrlLarge = GetTidalCoverUrl(album.Cover, "1280x1280"),
             IsLocal = false,
             ExternalProvider = "squidwtf",
@@ -1033,7 +1092,7 @@ public class SquidWTFMetadataService : IMusicMetadataService
             Year = year,
             SongCount = albumData.NumberOfTracks,
             ReleaseType = albumData.Type,
-            CoverArtUrl = GetTidalCoverUrl(albumData.Cover, "320x320"),
+            CoverArtUrl = GetTidalCoverUrl(albumData.Cover, "640x640"),
             CoverArtUrlLarge = GetTidalCoverUrl(albumData.Cover, "1280x1280"),
             IsLocal = false,
             ExternalProvider = "squidwtf",
@@ -1078,11 +1137,11 @@ public class SquidWTFMetadataService : IMusicMetadataService
             ExternalId = playlist.Uuid ?? "",
             TrackCount = playlist.NumberOfTracks,
             Duration = playlist.Duration,
-            CoverUrl = GetTidalCoverUrl(playlist.SquareImage ?? playlist.Image, "320x320")
+            CoverUrl = GetTidalCoverUrl(playlist.SquareImage ?? playlist.Image, "640x640")
         };
     }
 
-    private static string? GetTidalCoverUrl(string? coverId, string size = "320x320")
+    private static string? GetTidalCoverUrl(string? coverId, string size = "640x640")
     {
         if (string.IsNullOrEmpty(coverId)) return null;
         
@@ -1096,7 +1155,7 @@ public class SquidWTFMetadataService : IMusicMetadataService
         if (string.IsNullOrEmpty(pictureId)) return null;
         
         var formattedId = pictureId.Replace("-", "/");
-        return $"https://resources.tidal.com/images/{formattedId}/320x320.jpg";
+        return $"https://resources.tidal.com/images/{formattedId}/750x750.jpg";
     }
 
     #endregion

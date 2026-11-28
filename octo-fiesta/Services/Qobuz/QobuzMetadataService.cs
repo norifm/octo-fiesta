@@ -1,3 +1,4 @@
+using octo_fiesta.Services.Common;
 using octo_fiesta.Models.Domain;
 using octo_fiesta.Models.Settings;
 using octo_fiesta.Models.Download;
@@ -20,6 +21,9 @@ public partial class QobuzMetadataService : IMusicMetadataService
     private readonly ILogger<QobuzMetadataService> _logger;
     private readonly string? _userAuthToken;
     private readonly string? _userId;
+
+    // Format ID downloads ask for, which caps what a track is delivered in
+    private readonly int _formatId;
     
     private const string BaseUrl = "https://www.qobuz.com/api.json/0.2/";
 
@@ -38,6 +42,7 @@ public partial class QobuzMetadataService : IMusicMetadataService
         var qobuzConfig = qobuzSettings.Value;
         _userAuthToken = qobuzConfig.UserAuthToken;
         _userId = qobuzConfig.UserId;
+        _formatId = QobuzQuality.GetFormatId(qobuzConfig.Quality);
         
         // Set up default headers
         _httpClient.DefaultRequestHeaders.Add("User-Agent", 
@@ -188,6 +193,49 @@ public partial class QobuzMetadataService : IMusicMetadataService
             _logger.LogError(ex, "Failed to get song {ExternalId}", externalId);
             return null;
         }
+    }
+
+    public async Task<Album?> GetAlbumByBarcodeAsync(string barcode)
+    {
+        try
+        {
+            var appId = await _bundleService.GetAppIdAsync();
+            var url = $"{BaseUrl}catalog/search?query={Uri.EscapeDataString(barcode.TrimStart('0'))}&type=albums&limit=25&app_id={appId}";
+
+            var response = await GetWithAuthAsync(url);
+            if (response.IsSuccessStatusCode)
+            {
+                var json = await response.Content.ReadAsStringAsync();
+                var result = JsonDocument.Parse(json);
+                if (result.RootElement.TryGetProperty("albums", out var albumsData) &&
+                    albumsData.TryGetProperty("items", out var items))
+                {
+                    // a text search: keep only the album whose own barcode matches
+                    foreach (var item in items.EnumerateArray())
+                    {
+                        var upc = item.TryGetProperty("upc", out var upcEl) ? upcEl.GetString() : null;
+                        var id = item.TryGetProperty("id", out var idEl) ? idEl.ToString() : null;
+                        if (id != null && BarcodeHelper.AreEqual(upc, barcode))
+                        {
+                            return await GetAlbumAsync("qobuz", id);
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to search album by barcode {Barcode}", barcode);
+        }
+
+        // many Qobuz album ids are the barcode itself
+        foreach (var variant in BarcodeHelper.Variants(barcode))
+        {
+            var album = await GetAlbumAsync("qobuz", variant);
+            if (album != null) return album;
+        }
+
+        return null;
     }
 
     public async Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
@@ -622,8 +670,28 @@ public partial class QobuzMetadataService : IMusicMetadataService
             IsLocal = false,
             ExternalProvider = "qobuz",
             IsExplicit = ReadParentalWarning(track),
-            ExternalId = externalId
+            ExternalId = externalId,
+            ExpectedFormat = QobuzQuality.ExpectedFormat(_formatId,
+                GetMaximum(track, "maximum_bit_depth") is { } depth ? (int)depth : null,
+                GetMaximum(track, "maximum_sampling_rate"))
         };
+    }
+
+    /// <summary>
+    /// A track's maximum resolution field, taken from its album when the track lacks it.
+    /// </summary>
+    private static double? GetMaximum(JsonElement track, string property)
+    {
+        if (track.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number)
+        {
+            return value.GetDouble();
+        }
+        if (track.TryGetProperty("album", out var album) && album.ValueKind == JsonValueKind.Object
+            && album.TryGetProperty(property, out var albumValue) && albumValue.ValueKind == JsonValueKind.Number)
+        {
+            return albumValue.GetDouble();
+        }
+        return null;
     }
 
     private Song ParseQobuzTrackFull(JsonElement track)
