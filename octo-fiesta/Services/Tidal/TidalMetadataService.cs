@@ -27,12 +27,17 @@ public class TidalMetadataService : IMusicMetadataService
     private readonly SubsonicSettings _subsonicSettings;
     private readonly ILogger<TidalMetadataService> _logger;
 
+    // Configured tier, which decides what downloads deliver
+    private readonly string? _quality;
+
     public TidalMetadataService(
         IHttpClientFactory httpClientFactory,
         TidalAuthService auth,
         IOptions<SubsonicSettings> subsonicSettings,
-        ILogger<TidalMetadataService> logger)
+        ILogger<TidalMetadataService> logger,
+        IOptions<TidalSettings>? tidalSettings = null)
     {
+        _quality = tidalSettings?.Value.Quality;
         _httpClient = httpClientFactory.CreateClient(TidalHttpClientConfiguration.AuthClientName);
         _auth = auth;
         _subsonicSettings = subsonicSettings.Value;
@@ -100,6 +105,16 @@ public class TidalMetadataService : IMusicMetadataService
 
         var track = Deserialize<TidalTrack>(json);
         return track is null ? null : MapTrackToSong(track);
+    }
+
+    public async Task<Album?> GetAlbumByBarcodeAsync(string barcode)
+    {
+        // Tidal has no barcode lookup on this API, so search the digits and keep only
+        // an album whose own UPC is the one asked for.
+        var result = await SearchAsync(barcode.TrimStart('0'), "ALBUMS", 25);
+        var match = result?.Albums?.Items?.FirstOrDefault(a => BarcodeHelper.AreEqual(a.Upc, barcode));
+
+        return match is null ? null : await GetAlbumAsync(ProviderName, match.Id.ToString(CultureInfo.InvariantCulture));
     }
 
     public async Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
@@ -308,7 +323,7 @@ public class TidalMetadataService : IMusicMetadataService
 
     #region Mapping
 
-    private static Song MapTrackToSong(TidalTrack track)
+    private Song MapTrackToSong(TidalTrack track)
     {
         var artists = track.Artists?
             .Where(a => !string.IsNullOrEmpty(a.Name))
@@ -353,7 +368,8 @@ public class TidalMetadataService : IMusicMetadataService
             IsLocal = false,
             ExternalProvider = ProviderName,
             ExternalId = track.Id.ToString(),
-            ExplicitContentLyrics = track.Explicit ? 1 : 0
+            ExplicitContentLyrics = track.Explicit ? 1 : 0,
+            ExpectedFormat = TidalQuality.ExpectedFormat(_quality, track.AudioQuality, track.MediaMetadata?.Tags)
         };
     }
 
@@ -418,7 +434,7 @@ public class TidalMetadataService : IMusicMetadataService
     /// <summary>
     /// Cover and picture ids are UUIDs whose dashes become path separators on the CDN.
     /// </summary>
-    private static string? BuildCoverUrl(string? coverId, string size = "320x320")
+    private static string? BuildCoverUrl(string? coverId, string size = "640x640")
     {
         if (string.IsNullOrEmpty(coverId)) return null;
         return $"https://resources.tidal.com/images/{coverId.Replace("-", "/")}/{size}.jpg";

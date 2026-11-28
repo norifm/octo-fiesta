@@ -727,13 +727,21 @@ public partial class SubsonicResponseBuilder
     public IActionResult CreateTranscodeDecisionResponse(Song? song, string protocol)
     {
         string container = "mp3";
+        string codec = "mp3";
         int bitRate = 128;
         if (song != null)
         {
             var (suffix, _, br) = GetSuffixContentTypeAndBitrate(song);
             container = suffix;
             bitRate = br > 0 ? br : 128;
+<<<<<<< HEAD
             if (br == 0) container = "mp3"; // fork: no file yet, the suffix is only the origin label
+=======
+            // A downloaded .m4a is assumed to hold AAC; its extension can't tell FLAC-in-MP4 apart.
+            codec = string.IsNullOrEmpty(song.LocalPath) && !song.IsLocal && song.ExpectedFormat is { } expected
+                ? expected.Codec
+                : suffix == "m4a" ? "aac" : suffix;
+>>>>>>> upstream/dev
         }
 
         return CreateJsonResponse(new
@@ -749,7 +757,7 @@ public partial class SubsonicResponseBuilder
                 {
                     protocol,
                     container,
-                    codec = container,
+                    codec,
                     audioChannels = 2,
                     audioBitrate = bitRate * 1000
                 }
@@ -772,6 +780,7 @@ public partial class SubsonicResponseBuilder
                 ".flac" => ("flac", "audio/flac", 1411),
                 ".m4a" => ("m4a", "audio/mp4", 320),
                 ".mp3" => ("mp3", "audio/mpeg", 320),
+                ".aac" => ("aac", "audio/aac", 256),
                 _ => ("mp3", "audio/mpeg", 128)
             };
         }
@@ -782,9 +791,21 @@ public partial class SubsonicResponseBuilder
             return ("mp3", "audio/mpeg", 128);
         }
 
+<<<<<<< HEAD
         if (_showExternalProviderInSuffix) return (GetExternalSuffix(song), "audio/mpeg", 0); // fork
 
         // Default for external providers (Deezer, Qobuz, SquidWTF) without cached file
+=======
+        // Not downloaded yet: what the provider is expected to deliver. Clients size their
+        // buffers and pick a decoder from this, so a FLAC stream announced as 128 kbps MP3
+        // starts choppy.
+        if (song.ExpectedFormat is { } expected)
+        {
+            return (expected.Suffix, expected.ContentType, expected.BitRate);
+        }
+
+        // Providers that cannot tell
+>>>>>>> upstream/dev
         return ("mp3", "audio/mpeg", 128);
     }
 

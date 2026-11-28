@@ -32,7 +32,11 @@ public partial class SubsonicController : ControllerBase
     private readonly SubsonicProxyService _proxyService;
     private readonly PlaylistSyncService? _playlistSyncService;
     private readonly ILyricsService? _lyricsService;
+<<<<<<< HEAD
     private readonly ExternalAlbumMergeCache? _albumMergeCache;
+=======
+    private readonly ExternalCoverArtService _coverArt;
+>>>>>>> upstream/dev
     private readonly ILogger<SubsonicController> _logger;
     private readonly IHostApplicationLifetime _hostApplicationLifetime;
 
@@ -49,7 +53,11 @@ public partial class SubsonicController : ControllerBase
         ILogger<SubsonicController> logger,
         PlaylistSyncService? playlistSyncService = null,
         ILyricsService? lyricsService = null,
+<<<<<<< HEAD
         ExternalAlbumMergeCache? albumMergeCache = null)
+=======
+        ExternalCoverArtService? coverArt = null)
+>>>>>>> upstream/dev
     {
         _albumMergeCache = albumMergeCache;
         _subsonicSettings = subsonicSettings.Value;
@@ -64,6 +72,9 @@ public partial class SubsonicController : ControllerBase
         _playlistSyncService = playlistSyncService;
         _lyricsService = lyricsService;
         _logger = logger;
+        _coverArt = coverArt ?? new ExternalCoverArtService(metadataService,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ExternalCoverArtService>.Instance,
+            settings: subsonicSettings);
 
         if (string.IsNullOrWhiteSpace(_subsonicSettings.Url))
         {
@@ -112,6 +123,30 @@ public partial class SubsonicController : ControllerBase
             catch
             {
                 return _responseBuilder.CreateResponse(format, "searchResult3", new { });
+            }
+        }
+
+        // A barcode (UPC/EAN) query asks for the one album carrying it, e.g. a client
+        // resolving a MusicBrainz release; a text search on the digits would only add noise.
+        // When the provider can't resolve it, fall through to the regular search.
+        if (BarcodeHelper.IsBarcode(cleanQuery))
+        {
+            Album? barcodeAlbum = null;
+            try
+            {
+                barcodeAlbum = await _metadataService.GetAlbumByBarcodeAsync(cleanQuery);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Barcode lookup failed for {Barcode}, falling back to text search", cleanQuery);
+            }
+
+            if (barcodeAlbum != null)
+            {
+                var barcodeSubsonicResult = await _proxyService.RelaySafeAsync("rest/search3", parameters);
+                var barcodeResult = new SearchResult();
+                barcodeResult.Albums.Add(barcodeAlbum);
+                return MergeSearchResults(barcodeSubsonicResult, barcodeResult, new List<ExternalPlaylist>(), format);
             }
         }
 
@@ -173,6 +208,9 @@ public partial class SubsonicController : ControllerBase
             return await _proxyService.RelayStreamAsync(parameters, HttpContext.RequestAborted);
         }
 
+        // The player asks for the cover as playback starts; have it ready by then
+        _coverArt.Prefetch(provider!, externalId!);
+
         // Serve an already-owned copy from the library instead of re-downloading. A copy
         // below the target quality is still served right away, the upgrade runs in background.
         var ownedSongId = await _localLibraryService.GetLocalIdForExternalSongAsync(provider!, externalId!);
@@ -190,11 +228,19 @@ public partial class SubsonicController : ControllerBase
         // Otherwise download from the provider and stream (quality upgrade logic applies)
         try
         {
+<<<<<<< HEAD
             await MarkExternalAlbumDownloadStartedAsync(provider!, externalId!);
             // The download is deliberately not tied to RequestAborted. Nothing is sent to the
             // client until the file is complete, so a client that gives up waiting would kill
             // the download, drop the partial file, and restart from zero on every retry. Only
             // application shutdown cancels it.
+=======
+            // The download is deliberately not tied to RequestAborted: a client that gives up
+            // (or skips) would otherwise kill the download, drop the partial file, and restart
+            // from zero on every retry. Only application shutdown cancels it. For providers that
+            // announce the size, the stream returned here starts with the first bytes and
+            // follows the download as it grows.
+>>>>>>> upstream/dev
             var (downloadStream, filePath) = await _downloadService.DownloadAndStreamAsync(
                 provider!, externalId!, _hostApplicationLifetime.ApplicationStopping);
             return File(downloadStream, GetContentType(filePath), enableRangeProcessing: true);
@@ -1047,23 +1093,8 @@ public partial class SubsonicController : ControllerBase
             try
             {
                 var (provider, externalId) = PlaylistIdHelper.ParsePlaylistId(id);
-                var playlist = await _metadataService.GetPlaylistAsync(provider, externalId);
-                
-                if (playlist == null || string.IsNullOrEmpty(playlist.CoverUrl))
-                {
-                    return NotFound();
-                }
-                
-                // Download and return the cover image
-                var imageResponse = await new HttpClient().GetAsync(playlist.CoverUrl);
-                if (!imageResponse.IsSuccessStatusCode)
-                {
-                    return NotFound();
-                }
-                
-                var imageBytes = await imageResponse.Content.ReadAsByteArrayAsync();
-                var contentType = imageResponse.Content.Headers.ContentType?.ToString() ?? "image/jpeg";
-                return File(imageBytes, contentType);
+                var playlistCover = await _coverArt.GetPlaylistCoverAsync(provider, externalId);
+                return playlistCover == null ? NotFound() : CoverResult(playlistCover);
             }
             catch (Exception ex)
             {
@@ -1088,67 +1119,27 @@ public partial class SubsonicController : ControllerBase
             }
         }
 
-        string? coverUrl = null;
-
-        // Use type to determine which API to call first
-        switch (type)
+        // The configured cover size whatever size is asked for
+        try
         {
-            case "artist":
-                var artist = await _metadataService.GetArtistAsync(coverProvider!, coverExternalId!);
-                if (artist?.ImageUrl != null)
-                {
-                    coverUrl = artist.ImageUrl;
-                }
-                break;
-                
-            case "album":
-                var album = await _metadataService.GetAlbumAsync(coverProvider!, coverExternalId!);
-                if (album?.CoverArtUrl != null)
-                {
-                    coverUrl = album.CoverArtUrlLarge ?? album.CoverArtUrl;
-                }
-                break;
-                
-            case "song":
-            default:
-                if (coverUrl == null)
-                {
-                    var song = await _metadataService.GetSongAsync(coverProvider!, coverExternalId!);
-                    if (song?.CoverArtUrl != null)
-                    {
-                        coverUrl = song.CoverArtUrlLarge ?? song.CoverArtUrl;
-                    }
-                    else
-                    {
-                        var albumFallback = await _metadataService.GetAlbumAsync(coverProvider!, coverExternalId!);
-                        if (albumFallback?.CoverArtUrl != null)
-                        {
-                            coverUrl = albumFallback.CoverArtUrlLarge ?? albumFallback.CoverArtUrl;
-                        }
-                    }
-                }
-                break;
+            var cover = await _coverArt.GetAsync(coverProvider!, type ?? "song", coverExternalId!);
+            return cover == null ? NotFound() : CoverResult(cover);
         }
-        
-        if (coverUrl != null)
+        catch (Exception ex)
         {
-            using var httpClient = new HttpClient();
-            using var req = new HttpRequestMessage(HttpMethod.Get, coverUrl);
-
-            var response = await httpClient.SendAsync(req);
-            if (response.IsSuccessStatusCode)
-            {
-                var imageBytes = await response.Content.ReadAsByteArrayAsync();
-                var contentType = response.Content.Headers.ContentType?.ToString() ?? "image/jpeg";
-                return File(imageBytes, contentType);
-            }
-            _logger.LogWarning("Cover art fetch failed for {Url}: HTTP {Status}", coverUrl, (int)response.StatusCode);
+            _logger.LogWarning(ex, "Error getting cover art for {Id}", id);
+            return NotFound();
         }
-
-        return NotFound();
     }
 
     #region Helper Methods
+
+    // A provider cover never changes under its id, so clients may keep it
+    private FileContentResult CoverResult(ExternalCoverArtService.CoverImage cover)
+    {
+        Response.Headers.CacheControl = "public, max-age=86400";
+        return File(cover.Data, cover.ContentType);
+    }
 
     /// <summary>
     /// Extracts a named element of a Subsonic XML response, or null when the payload is
